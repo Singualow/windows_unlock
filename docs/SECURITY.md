@@ -1,45 +1,49 @@
-# Security model
+# 安全模型
 
-## Trust boundary
+## 信任边界
 
-The Android phone proves possession of a non-exportable P-256 key. The Windows
-service validates the proof and creates a five-second, single-use authorization.
-The Credential Provider can consume that authorization once; it cannot scan
-Bluetooth or manufacture an authorization itself.
+Android 手机通过不可导出的 P-256 私钥证明设备持有权。Windows 服务验证证明后
+创建一个五秒有效、只能使用一次的授权。凭据提供程序只能消费该授权，不能自行
+扫描蓝牙或伪造授权。
 
-The system password is stored as LSA private data under
-`L$ProximityUnlock/Credential/<SID>`. Only LocalSystem receives access to the
-credential IPC pipe. Public keys, thresholds, and non-secret identifiers live
-in `%ProgramData%\ProximityUnlock\config.json`.
+Windows 密码以 LSA 私密数据形式保存在
+`L$ProximityUnlock/Credential/<SID>`。只有 LocalSystem 可以访问凭据 IPC 管道。
+公钥、阈值和非秘密标识存储在 `%ProgramData%\ProximityUnlock\config.json`。
 
-## Fail-closed behavior
+电脑身份密钥使用不可导出的 CNG P-256 密钥，优先选择 TPM Platform Crypto
+Provider，不可用时回退到 Software KSP。Android 密钥优先使用 StrongBox，
+不可用时回退到 TEE。
 
-- Service restart, phone/app absence, invalid HMAC/signature, replay, expired
-  challenge, wrong mode, stale password, or Bluetooth failure produces no tile.
-  If the service disappears while the desktop is open and auto-lock is enabled,
-  the per-user agent locks the console after 20 seconds.
-- Three authentication failures in one minute start a five-minute cooldown.
-- A password rejection disables automatic unlock until the password is
-  re-enrolled after a normal Windows login.
-- Boot logon, logoff, RDP, UAC, and CredUI are unsupported.
-- By default, `Win+L` while already near is not reversed until the phone leaves
-  for ten seconds and returns. The tray's lower-security immediate-unlock mode
-  removes that manual-lock hold but still requires the RSSI threshold, three
-  recent advertisements, a fresh challenge, and a valid phone signature.
-  Resume from sleep gets one fresh challenge window.
+## 失败关闭原则
 
-## Residual risks
+- 服务重启、手机或应用离线、HMAC/签名无效、重放、挑战过期、模式错误、密码
+  失效或蓝牙故障时，均不会提供自动解锁凭据。如果桌面处于打开状态且启用了
+  自动锁定，服务消失后当前用户代理会在约 20 秒后锁定控制台。
+- 一分钟内出现三次认证失败，会进入五分钟冷却。
+- Windows 拒绝密码后，自动解锁会被禁用，必须正常登录后从托盘重新录入密码。
+- 开机登录、注销、RDP、UAC 和 CredUI 不在支持范围内。
+- 默认情况下，在手机已经靠近时按 `Win+L` 不会立即重新解锁；手机必须离开十秒
+  后返回。较低安全性的立即解锁模式会移除此限制，但仍要求 RSSI 达标、连续三次
+  新鲜广播、一次新挑战和有效手机签名。从睡眠恢复时允许一次新的挑战窗口。
 
-- BLE RSSI is not cryptographic distance bounding. A capable relay can make a
-  remote phone appear nearby.
-- Convenience mode permits a stolen but locked phone to sign in the background.
-- Immediate-unlock mode can reverse an intentional `Win+L` within a few seconds
-  whenever the configured phone is already nearby and able to sign.
-- A compromised Windows administrator or LocalSystem process can retrieve the
-  Microsoft account password despite LSA storage.
-- The release APK is signed by a local personal P-256 certificate; the DLL and
-  Windows executables are not commercially code-signed. They are intended for
-  this one PC and phone only.
+## 密钥和日志
 
-Never disable all built-in Credential Providers and never test the first
-registration without knowing the current Windows password/PIN.
+- Microsoft 账户密码不会写入配置文件或日志。
+- 日志不得包含密码、私钥、完整签名或可持续追踪的手机标识。
+- 配对使用的一次性 256 位密钥在 HKDF 派生完成后清除。
+- 广播标识每 30 秒滚动，不依赖蓝牙 MAC、设备名称或静态设备信息。
+
+## 剩余风险
+
+- BLE RSSI 不是密码学距离界定。具备能力的攻击者可能通过中继让远处手机看似
+  位于电脑附近。
+- 便捷模式允许被盗但仍锁屏的手机在后台签名，持有该手机的人可能解锁附近电脑。
+- 立即解锁模式可能在已配置手机仍在附近且能够签名时，于数秒内撤销主动执行的
+  `Win+L`。
+- Windows 管理员或 LocalSystem 被攻破后，即使密码存放在 LSA 中，攻击者仍
+  可能取得 Microsoft 账户密码。
+- Release APK 使用本地个人 P-256 证书签名；DLL 和 Windows 可执行文件没有
+  商业代码签名，仅适合自行审计后的个人测试。
+
+任何时候都不要禁用全部系统凭据提供程序。首次注册前必须确认当前 Windows
+密码或 PIN 可用，并保留至少一种系统恢复登录方式。

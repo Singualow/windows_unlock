@@ -1,48 +1,67 @@
 # Proximity Unlock
 
-Proximity Unlock is a personal, single-PC proof-of-possession unlock system for
-Windows 11 and Android 15. The Windows coordinator is written in Go, the phone
-companion is a Kotlin BLE peripheral, and the Windows LogonUI bridge is a small
-native V2 Credential Provider.
+Proximity Unlock 是一套面向个人使用的蓝牙近距离自动解锁工具，支持一台
+Windows 11 电脑和一部 Android 15 及以上版本的手机。Windows 协调服务使用
+Go 编写，手机端使用 Kotlin 实现 BLE 外设，Windows 锁屏界面通过小型原生
+V2 凭据提供程序接入。
 
 > [!WARNING]
-> This project intentionally does **not** replace or filter Windows password,
-> PIN, or Windows Hello providers. Do not register the Credential Provider until
-> the service self-test and phone pairing both pass. Bluetooth RSSI is not secure
-> distance bounding, and relay attacks remain possible.
+> 本项目不会替换或隐藏 Windows 密码、PIN、Windows Hello 等系统登录方式。
+> 首次启用凭据提供程序前，必须先通过服务自检并完成手机配对。蓝牙 RSSI
+> 不是安全的距离证明，无法彻底阻止专业中继攻击。
 
-## Safety boundaries
+## 主要功能
 
-- Automatic unlock is allowed only for an already logged-in, locked local
-  console session. Boot logon, logoff, RDP, UAC, and CredUI are excluded.
-- By default, a deliberate `Win+L` while the phone is nearby stays locked until
-  the phone has been absent for at least ten seconds and then returns. The tray
-  can enable an explicitly lower-security immediate-unlock mode that skips only
-  this away-and-return requirement.
-- The Microsoft account password is stored only as Windows LSA private data.
-  It is never placed in `config.json` or logs.
-- The Android app has strict and convenience keys. Strict mode cannot sign
-  while Android is locked; convenience mode can.
+- 手机靠近并通过加密挑战后，自动解锁已经登录且处于锁定状态的本地控制台会话。
+- 支持安全模式和便捷模式，以及可选的“锁屏后立即解锁”模式。
+- 支持自动锁定、距离校准、暂停、撤销手机、更新 Windows 密码和完整卸载。
+- 配对、设置、凭据提供程序注册和卸载均集成在任务栏托盘中，普通用户无需输入命令。
+- 开机登录、注销、RDP、UAC 和 CredUI 不会自动解锁，仍需使用系统登录方式。
 
-## Repository layout
+## 安全边界
 
-- `cmd/proximity-service`: LocalSystem Windows service and coordinator.
-- `cmd/proximityctl`: enrollment, status, calibration, and safe installation CLI.
-- `cmd/proximity-agent`: per-user auto-lock and notification agent.
-- `cmd/installer`: single-file GUI installer that embeds all Windows payloads.
-- `internal/`: shared protocol, crypto, state machine, secure storage, and IPC.
-- `android/`: Android 15 BLE peripheral companion.
-- `native/credential-provider/`: x64 V2 Credential Provider.
-- `scripts/`: build, install, recovery, and uninstall scripts.
+- 默认情况下，手机仍在附近时按下 `Win+L`，电脑会保持锁定；手机必须离开至少
+  10 秒后再次靠近。托盘中的“锁屏后立即解锁”选项会跳过此离开再返回要求，
+  因而安全性较低。
+- Microsoft 账户密码仅存储在 Windows LSA 私密数据中，不会写入
+  `config.json` 或日志。
+- Android 应用保存两把不可导出的 P-256 密钥：安全模式在手机锁屏时拒绝签名，
+  便捷模式允许锁屏后台签名。
+- 每次解锁均使用新的随机数、短期授权和单调计数器，并拒绝过期或重放的响应。
 
-Built Windows binaries and both Android APK variants are placed in `bin/`.
-End users double-click `ProximityUnlockInstaller.exe`; it requests elevation,
-uses the Windows secure credential dialog, installs the service, and starts the
-tray. Pairing, distance calibration, password updates, immediate-unlock mode,
-device revocation, Credential Provider registration, and uninstall are all
-available from the tray—no terminal commands are required. Credential Provider
-registration remains gated on a fresh authenticated phone proof, and the tray
-never disables PIN, password, or Windows Hello providers.
+## 下载与安装
 
-See [docs/SECURITY.md](docs/SECURITY.md) before installing and
-[docs/BUILD.md](docs/BUILD.md) for the exact toolchain commands.
+请从仓库的 [Releases](https://github.com/Singualow/windows_unlock/releases)
+页面下载：
+
+- `ProximityUnlockInstaller.exe`：Windows 一键安装程序。
+- `ProximityUnlock-Android.apk`：Android 15+ 手机应用。
+
+安装前请确保自己知道当前 Microsoft 账户的真实密码，而不只是 PIN。
+
+1. 双击 Windows 安装程序并批准 UAC，按系统安全对话框输入当前账户密码。
+2. 在 Android 手机上安装 APK，并授予附近设备和通知权限。
+3. 从 Windows 托盘选择“配对手机…”，用手机扫描两分钟内有效的二维码。
+4. 配对完成并确认手机信号正常后，在托盘中启用 Windows 锁屏自动解锁。
+5. 始终保留 PIN、密码或 Windows Hello 作为恢复方式。
+
+Windows 可执行文件和 DLL 尚未进行商业代码签名，系统可能显示 SmartScreen
+警告。请只从本仓库 Release 下载，并核对 Release 页面提供的 SHA-256。
+
+## 仓库结构
+
+- `cmd/proximity-service`：以 LocalSystem 运行的 Windows 服务和协调器。
+- `cmd/proximityctl`：初始化、状态、校准及维护控制程序。
+- `cmd/proximity-agent`：当前用户的托盘、自动锁定和通知程序。
+- `cmd/installer`：内嵌全部 Windows 组件的单文件图形安装器。
+- `internal`：协议、密码学、状态机、安全存储和 IPC 实现。
+- `android`：Android 15 BLE 外设应用。
+- `native/credential-provider`：x64 V2 凭据提供程序。
+- `native/ble-broker`：Windows 原生 BLE 后端和诊断程序。
+- `scripts`：开发者使用的构建、测试、恢复和卸载脚本。
+
+## 开发文档
+
+- [构建与安全安装](docs/BUILD.md)
+- [BLE 协议](docs/PROTOCOL.md)
+- [安全模型](docs/SECURITY.md)

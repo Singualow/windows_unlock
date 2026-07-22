@@ -1,63 +1,59 @@
-# Build and safe installation
+# 构建与安全安装
 
-## Toolchain
+## 开发工具链
 
 - Windows 11 x64
-- Go `1.26.4` (`GOROOT`, `PATH`, or `%USERPROFILE%\Env\GOROOT`)
-- Android SDK 35, JDK 17, and Gradle 8.9 (`ANDROID_HOME`, `JAVA_HOME`,
-  `PATH`, or the matching directories under `%USERPROFILE%\Env\ANDROID`)
-- Visual Studio 2022 Build Tools with the C++ desktop workload and Windows SDK
+- Go `1.26.4`，通过 `GOROOT`、`PATH` 或 `%USERPROFILE%\Env\GOROOT` 提供
+- Android SDK 35、JDK 17 和 Gradle 8.9，通过 `ANDROID_HOME`、`JAVA_HOME`、
+  `PATH` 或 `%USERPROFILE%\Env\ANDROID` 下的对应目录提供
+- Visual Studio 2022 Build Tools，并安装“使用 C++ 的桌面开发”和 Windows SDK
 
-From an ordinary PowerShell prompt:
+在普通 PowerShell 窗口中执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-The build runs Go tests/vet, compiles the real WinRT BLE tag, builds the x64
-Credential Provider with `/W4 /WX`, builds the Android debug APK, packages all
-Windows payloads into the single GUI `bin\ProximityUnlockInstaller.exe`, and
-writes SHA-256 hashes under `bin`. Then create the stable personal-signed APK:
+构建过程会运行 Go 测试和静态检查、编译真实的 WinRT BLE 后端、以 `/W4 /WX`
+编译 x64 凭据提供程序、构建 Android 调试 APK，并把全部 Windows 组件打包为
+单文件图形安装器 `bin\ProximityUnlockInstaller.exe`。各产物的 SHA-256 会写入
+`bin\SHA256SUMS.txt`。
+
+如需生成可连续升级的个人签名 APK，再执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-personal-apk.ps1
 ```
 
-## End-user installation
+## 普通用户安装
 
-The end user does not run PowerShell, build scripts, `proximityctl`, or setup
-commands.
+普通用户不需要执行 PowerShell、构建脚本、`proximityctl` 或安装命令。
 
-1. Keep Windows PIN/password/Hello enabled as a recovery method.
-2. Double-click `bin\ProximityUnlockInstaller.exe`, approve UAC, and complete
-   the Windows secure credential dialog with the Microsoft account **password**
-   (not the PIN). The installer starts the tray automatically.
-3. Sideload `bin\ProximityUnlock-android-personal.apk` on the Android 15 phone
-   and grant Nearby devices and notification permissions.
-4. From the tray choose **配对手机…**, scan the two-minute QR code, and wait for
-   the tray status to show the phone signal.
-5. Keep the phone unlocked in strict mode, then check **启用 Windows 锁屏自动解锁**
-   in the tray and approve UAC. Registration is refused unless the real BLE
-   service has a fresh authenticated phone proof.
-6. Optionally check **锁屏后立即解锁（降低安全性）** to skip the default ten-second
-   away-and-return rule after `Win+L`. RSSI and a fresh signature are still
-   required.
+1. 保留 Windows PIN、密码或 Windows Hello 作为恢复方式。
+2. 双击 `ProximityUnlockInstaller.exe`，批准 UAC，并在 Windows 安全凭据对话框中
+   输入 Microsoft 账户的真实密码，不能使用 PIN。安装器会自动启动托盘。
+3. 在 Android 15+ 手机上安装 `ProximityUnlock-Android.apk`，并授予附近设备和
+   通知权限。
+4. 从托盘选择“配对手机…”，扫描两分钟内有效的二维码，等待托盘显示手机信号。
+5. 在安全模式下先解锁手机，然后勾选“启用 Windows 锁屏自动解锁”并批准 UAC。
+   如果服务尚未获得手机的新鲜认证证明，注册会被拒绝。
+6. 如需在手机已经靠近时也立即撤销 `Win+L`，可勾选“锁屏后立即解锁
+   （降低安全性）”。此选项只跳过默认十秒离开再返回规则，RSSI 阈值和新鲜签名
+   仍然必须通过。
 
-For the stable, personal-signed APK used for updates, run
-`scripts\build-personal-apk.ps1` and install
-`bin\ProximityUnlock-android-personal.apk`. Its P-256 signing key is under the
-Git-ignored `.local` directory; the password is DPAPI-protected to the current
-Windows user. Back up that directory together with the Windows profile if you
-need to preserve Android update continuity. The debug APK is only for initial
-development tests.
+## Android 个人签名
 
-After changing the Microsoft account password, choose **更新 Windows 密码…**
-from the tray and approve the system dialog.
+`scripts\build-personal-apk.ps1` 会在 Git 忽略的 `.local` 目录中创建个人 P-256
+签名证书，并使用当前 Windows 用户的 DPAPI 保护随机密码。需要保持 Android
+应用升级连续性时，请将 `.local` 目录连同 Windows 用户资料一起安全备份。
+调试 APK 仅供开发测试，不适合作为稳定更新渠道。
 
-## Recovery
+## 密码更新与恢复
 
-The provider never filters built-in Windows providers. If Bluetooth or the
-service fails, select PIN/password/Hello normally. Uncheck **启用 Windows 锁屏自动解锁**
-in the tray to unregister only the custom provider. Choose **卸载软件…** to
-remove LSA secrets, the CNG identity key, pairing data, service, startup agent,
-and installed files.
+更改 Microsoft 账户密码后，请从托盘选择“更新 Windows 密码…”，并在系统安全
+对话框中重新录入。
+
+凭据提供程序从不屏蔽系统内置登录方式。蓝牙或服务故障时，可以正常选择 PIN、
+密码或 Windows Hello。取消勾选“启用 Windows 锁屏自动解锁”只会注销自定义
+凭据提供程序；选择“卸载软件…”会删除 LSA 私密数据、CNG 身份密钥、配对记录、
+服务、启动项、System32 中的凭据提供程序 DLL 和安装文件。
