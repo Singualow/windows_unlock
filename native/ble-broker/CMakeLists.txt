@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.25)
+project(ProximityUnlockBLEBroker LANGUAGES CXX)
+
+add_library(ProximityUnlockBLEBroker SHARED src/ble_broker.cpp)
+target_compile_features(ProximityUnlockBLEBroker PRIVATE cxx_std_20)
+target_compile_options(ProximityUnlockBLEBroker PRIVATE /W4 /WX /utf-8 /EHsc /guard:cf /sdl)
+target_link_options(ProximityUnlockBLEBroker PRIVATE /guard:cf)
+target_link_libraries(ProximityUnlockBLEBroker PRIVATE windowsapp)
+target_include_directories(ProximityUnlockBLEBroker PUBLIC src)
+
+add_executable(ProximityUnlockBLEProbeNative src/probe.cpp)
+target_compile_features(ProximityUnlockBLEProbeNative PRIVATE cxx_std_20)
+target_compile_options(ProximityUnlockBLEProbeNative PRIVATE /W4 /WX /utf-8 /EHsc /guard:cf /sdl)
+target_link_options(ProximityUnlockBLEProbeNative PRIVATE /guard:cf)
+target_link_libraries(ProximityUnlockBLEProbeNative PRIVATE ProximityUnlockBLEBroker windowsapp)
