@@ -4,7 +4,7 @@ $Bin = Join-Path $Root 'bin'
 $Install = Join-Path $env:ProgramFiles 'ProximityUnlock'
 $Names = @(
     'ProximityUnlockSvc.exe',
-    'ProximityUnlockAgent.exe',
+    'ProximityUnlock.exe',
     'proximityctl.exe',
     'ProximityUnlockCredentialProvider.dll',
     'setup.exe',
@@ -19,18 +19,20 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 foreach ($name in $Names) {
     if (-not (Test-Path (Join-Path $Bin $name))) { throw "Missing build artifact: $name" }
-    if (-not (Test-Path (Join-Path $Install $name))) { throw "Missing installed file: $name" }
 }
 
 $backups = @()
 try {
     Stop-Service ProximityUnlockSvc -Force
     Get-Process ProximityUnlockAgent -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process ProximityUnlock -ErrorAction SilentlyContinue | Stop-Process -Force
     foreach ($name in $Names) {
         $destination = Join-Path $Install $name
         $backup = "$destination.update-backup"
-        Copy-Item -Force $destination $backup
-        $backups += $backup
+        if (Test-Path $destination) {
+            Copy-Item -Force $destination $backup
+            $backups += $backup
+        }
         Copy-Item -Force (Join-Path $Bin $name) $destination
         if ((Get-FileHash $destination).Hash -ne (Get-FileHash (Join-Path $Bin $name)).Hash) {
             throw "Hash verification failed after updating $name"
@@ -47,5 +49,12 @@ try {
     Start-Service ProximityUnlockSvc
 }
 
+$config = Get-Content -Raw (Join-Path $env:ProgramData 'ProximityUnlock\config.json') | ConvertFrom-Json
+$runKey = "Registry::HKEY_USERS\$($config.target_sid)\Software\Microsoft\Windows\CurrentVersion\Run"
+New-Item -Path $runKey -Force | Out-Null
+Remove-ItemProperty -Path $runKey -Name 'ProximityUnlockAgent' -ErrorAction SilentlyContinue
+Set-ItemProperty -Path $runKey -Name 'ProximityUnlock' -Value ('"' + (Join-Path $Install 'ProximityUnlock.exe') + '" --background')
+Remove-Item -Force (Join-Path $Install 'ProximityUnlockAgent.exe') -ErrorAction SilentlyContinue
+
 foreach ($backup in $backups) { Remove-Item -Force $backup -ErrorAction SilentlyContinue }
-Write-Host 'Installed Windows service, tray, management UI, Credential Provider, and uninstaller updated successfully.'
+Write-Host 'Installed Windows service, Tauri tray, management UI, Credential Provider, and uninstaller updated successfully.'

@@ -14,6 +14,7 @@ type Settings struct {
 	ProofTimeout        time.Duration
 	ManualHoldAway      time.Duration
 	ImmediateUnlock     bool
+	FailureCooldownOn   bool
 	FailureWindow       time.Duration
 	FailureLimit        int
 	FailureCooldown     time.Duration
@@ -29,6 +30,7 @@ func DefaultSettings() Settings {
 		LockWindow:          20 * time.Second,
 		ProofTimeout:        20 * time.Second,
 		ManualHoldAway:      10 * time.Second,
+		FailureCooldownOn:   true,
 		FailureWindow:       time.Minute,
 		FailureLimit:        3,
 		FailureCooldown:     5 * time.Minute,
@@ -66,6 +68,10 @@ func (s *State) UpdateSettings(settings Settings) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.settings = settings
+	if !settings.FailureCooldownOn {
+		s.failures = nil
+		s.cooldownUntil = time.Time{}
+	}
 	// Measurements collected under old thresholds must not immediately drive a
 	// lock or unlock decision after calibration.
 	s.samples = nil
@@ -137,11 +143,17 @@ func (s *State) RecordProof(now time.Time) {
 	defer s.mu.Unlock()
 	s.lastProof = now
 	s.failures = nil
+	s.cooldownUntil = time.Time{}
 }
 
 func (s *State) RecordFailure(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.settings.FailureCooldownOn {
+		s.failures = nil
+		s.cooldownUntil = time.Time{}
+		return
+	}
 	cutoff := now.Add(-s.settings.FailureWindow)
 	filtered := s.failures[:0]
 	for _, failure := range s.failures {
@@ -184,7 +196,7 @@ func (s *State) OnResume(now time.Time) {
 func (s *State) ShouldAttemptUnlock(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.locked || s.manualHold || now.Before(s.cooldownUntil) || !s.nearLocked(now) {
+	if !s.locked || s.manualHold || (s.settings.FailureCooldownOn && now.Before(s.cooldownUntil)) || !s.nearLocked(now) {
 		return false
 	}
 	return s.hasNearSamplesLocked(now) || now.Before(s.resumeWindowEnds)
@@ -205,7 +217,7 @@ func (s *State) ShouldAutoLock(now time.Time) bool {
 func (s *State) CanAuthenticate(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !now.Before(s.cooldownUntil)
+	return !s.settings.FailureCooldownOn || !now.Before(s.cooldownUntil)
 }
 
 func (s *State) MedianRSSI(now time.Time) (int, bool) {

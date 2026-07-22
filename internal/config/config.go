@@ -12,7 +12,7 @@ import (
 	"github.com/singu/proximity-unlock/internal/protocol"
 )
 
-const CurrentVersion = 1
+const CurrentVersion = 2
 
 type Thresholds struct {
 	UnlockRSSI       int `json:"unlock_rssi"`
@@ -35,6 +35,7 @@ type Config struct {
 	Mode             string     `json:"mode"`
 	AutoLock         bool       `json:"auto_lock"`
 	ImmediateUnlock  bool       `json:"immediate_unlock"`
+	FailureCooldown  bool       `json:"failure_cooldown_enabled"`
 	PausedUntil      *time.Time `json:"paused_until,omitempty"`
 	CredentialValid  bool       `json:"credential_valid"`
 	Thresholds       Thresholds `json:"thresholds"`
@@ -42,9 +43,10 @@ type Config struct {
 
 func Default() Config {
 	return Config{
-		Version:  CurrentVersion,
-		Mode:     protocol.ModeStrict.String(),
-		AutoLock: true,
+		Version:         CurrentVersion,
+		Mode:            protocol.ModeStrict.String(),
+		AutoLock:        true,
+		FailureCooldown: true,
 		Thresholds: Thresholds{
 			UnlockRSSI:       -65,
 			LockRSSI:         -80,
@@ -112,10 +114,12 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return Config{}, err
 	}
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(data, &raw)
 	if result.Version == 0 {
-		var raw map[string]json.RawMessage
-		_ = json.Unmarshal(data, &raw)
 		result = migrateV0(result, raw)
+	} else if result.Version == 1 {
+		result = migrateV1(result, raw)
 	}
 	if err := result.Validate(); err != nil {
 		return Config{}, err
@@ -131,6 +135,9 @@ func migrateV0(value Config, raw map[string]json.RawMessage) Config {
 	}
 	if _, present := raw["auto_lock"]; !present {
 		value.AutoLock = defaults.AutoLock
+	}
+	if _, present := raw["failure_cooldown_enabled"]; !present {
+		value.FailureCooldown = defaults.FailureCooldown
 	}
 	if value.Thresholds.UnlockRSSI == 0 {
 		value.Thresholds.UnlockRSSI = defaults.Thresholds.UnlockRSSI
@@ -149,6 +156,14 @@ func migrateV0(value Config, raw map[string]json.RawMessage) Config {
 	}
 	if value.Thresholds.ManualHoldAwayMS == 0 {
 		value.Thresholds.ManualHoldAwayMS = defaults.Thresholds.ManualHoldAwayMS
+	}
+	return value
+}
+
+func migrateV1(value Config, raw map[string]json.RawMessage) Config {
+	value.Version = CurrentVersion
+	if _, present := raw["failure_cooldown_enabled"]; !present {
+		value.FailureCooldown = Default().FailureCooldown
 	}
 	return value
 }

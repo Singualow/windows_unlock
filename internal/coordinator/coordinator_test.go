@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -117,6 +118,63 @@ func TestImmediateUnlockControlIsPersistedAndReported(t *testing.T) {
 	saved, err := config.Load(path)
 	if err != nil || !saved.ImmediateUnlock {
 		t.Fatal("immediate-unlock preference was not saved")
+	}
+}
+
+func TestFailureCooldownControlIsPersistedAndReported(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cfg := config.Default()
+	path := t.TempDir() + "/config.json"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := New(path, cfg, secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	response := c.HandleControl(context.Background(), mustRequest("set_failure_cooldown", map[string]any{"enabled": false}))
+	if !response.OK || c.Status(time.Now()).FailureCooldown {
+		t.Fatalf("failure-cooldown control failed: %s", response.Error)
+	}
+	saved, err := config.Load(path)
+	if err != nil || saved.FailureCooldown {
+		t.Fatal("failure-cooldown preference was not saved")
+	}
+}
+
+func TestTransientTransportFailuresDoNotTriggerSecurityCooldown(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	c := New("unused", config.Default(), secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	for i := 0; i < 5; i++ {
+		c.recordAuthenticationResult(authError("transport_timeout", "BLE 挑战响应超时", false, context.DeadlineExceeded))
+	}
+	status := c.Status(time.Now())
+	if !status.CooldownUntil.IsZero() || status.LastAuthFailureCode != "transport_timeout" {
+		t.Fatalf("transient transport failure triggered cooldown: %+v", status)
+	}
+}
+
+func TestAuthenticationRecoveryLogMatchesRateLimitedFailure(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	c := New("unused", config.Default(), secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	var entries []AuthenticationLogEntry
+	c.SetAuthenticationLogger(func(entry AuthenticationLogEntry) { entries = append(entries, entry) })
+
+	c.recordAuthenticationResult(authError("transport_timeout", "BLE 挑战响应超时", false, context.DeadlineExceeded))
+	c.recordAuthenticationResult(nil)
+	c.recordAuthenticationResult(authError("transport_timeout", "BLE 挑战响应超时", false, context.DeadlineExceeded))
+	c.recordAuthenticationResult(nil)
+
+	if len(entries) != 2 || !entries[0].Warning || entries[1].Code != "authentication_recovered" {
+		t.Fatalf("expected one failure/recovery pair, got %#v", entries)
+	}
+}
+
+func TestSecurityFailuresStillTriggerCooldownWhenEnabled(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	c := New("unused", config.Default(), secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	for i := 0; i < 3; i++ {
+		c.recordAuthenticationResult(authError("signature_invalid", "手机签名验证失败", true, errors.New("invalid signature")))
+	}
+	if !c.Status(time.Now()).CooldownUntil.After(time.Now()) {
+		t.Fatal("security failures did not trigger cooldown")
 	}
 }
 

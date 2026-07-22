@@ -22,10 +22,11 @@ import android.bluetooth.le.AdvertiseSettings
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-	import android.graphics.drawable.Icon
+import android.graphics.drawable.Icon
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import java.util.concurrent.Executors
 
 class UnlockService : Service() {
@@ -50,7 +51,12 @@ class UnlockService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 store.setEnabled(false)
+				store.setRuntimeStatus("已停止")
+				store.addEvent("蓝牙钥匙已停止", "warning", 0)
                 stopRuntime()
+				notifyStatusChanged()
+				stopForeground(STOP_FOREGROUND_REMOVE)
+				Log.i(TAG, "BLE key stopped")
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -58,6 +64,8 @@ class UnlockService : Service() {
         }
         if (!store.enabled()) return START_NOT_STICKY
         startForeground(NOTIFICATION_ID, notification())
+		Log.i(TAG, "BLE key foreground service started")
+		store.addEvent("蓝牙前台服务已启动", dedupeWindowMs = 60_000)
         if (hasBluetoothPermission()) startRuntime()
         return START_STICKY
     }
@@ -74,6 +82,7 @@ class UnlockService : Service() {
         try {
 			if (bluetoothManager.adapter?.isMultipleAdvertisementSupported != true) {
 				store.setRuntimeStatus("此手机不支持 BLE Peripheral 广播")
+				store.addEvent("手机不支持 BLE Peripheral 广播", "error", 0)
 				refreshNotification()
 				stopSelf()
 				return
@@ -88,6 +97,7 @@ class UnlockService : Service() {
 			}
         } catch (_: Exception) {
 			store.setRuntimeStatus("蓝牙或硬件密钥初始化失败")
+			store.addEvent("蓝牙或硬件密钥初始化失败", "error", 0)
 			refreshNotification()
             stopSelf()
         }
@@ -129,9 +139,13 @@ class UnlockService : Service() {
 			if (service.uuid != Protocol.SERVICE_UUID) return
 			gattReady = status == BluetoothGatt.GATT_SUCCESS
 			if (gattReady && store.enabled()) {
+				Log.i(TAG, "GATT service ready")
+				store.addEvent("GATT 安全服务已就绪", dedupeWindowMs = 60_000)
 				handler.post { restartAdvertising() }
 			} else {
+				Log.w(TAG, "GATT service initialization failed: $status")
 				store.setRuntimeStatus("GATT 服务初始化失败（错误码 $status）")
+				store.addEvent("GATT 服务初始化失败（错误码 $status）", "error", 0)
 				refreshNotification()
 				notifyStatusChanged()
 			}
@@ -192,12 +206,24 @@ class UnlockService : Service() {
             val pcPublic = Protocol.publicKey(store.pcPublic() ?: return)
             val challenge = Protocol.parseChallenge(payload, pcPublic, pcId, phoneId)
             val strict = challenge.mode == Protocol.MODE_STRICT
-            if (!strict && !store.convenienceAllowed()) return
-            if (strict && getSystemService(KeyguardManager::class.java).isDeviceLocked) return
+            if (!strict && !store.convenienceAllowed()) {
+				store.addEvent("已拒绝未启用的便捷模式认证", "warning", 60_000)
+				notifyStatusChanged()
+				return
+			}
+            if (strict && getSystemService(KeyguardManager::class.java).isDeviceLocked) {
+				store.addEvent("安全模式：手机锁屏，已拒绝认证", "warning", 60_000)
+				notifyStatusChanged()
+				return
+			}
             val counter = store.nextCounter()
             val response = Protocol.response(challenge, counter) { store.sign(strict, it) }
             notifyFragments(device, Protocol.RESPONSE_UUID, Protocol.MESSAGE_CHALLENGE, response)
-        } catch (_: Exception) {
+			store.addEvent("已完成电脑认证挑战", dedupeWindowMs = 60_000)
+			notifyStatusChanged()
+		} catch (_: Exception) {
+			store.addEvent("认证挑战校验失败", "warning", 60_000)
+			notifyStatusChanged()
             // Fail closed and intentionally return no protocol oracle.
         }
     }
@@ -219,6 +245,7 @@ class UnlockService : Service() {
             val presence = Protocol.presenceKey(pending.secret, pending.pcId, phoneId)
             store.completePairing(presence)
             presence.fill(0)
+			store.addEvent("电脑配对已安全完成", dedupeWindowMs = 0)
 			handler.post {
 				restartAdvertising()
 				notifyStatusChanged()
@@ -251,6 +278,7 @@ class UnlockService : Service() {
         }
 		if (data == null) {
 			store.setRuntimeStatus("等待新的配对二维码")
+			store.addEvent("正在等待电脑配对二维码", dedupeWindowMs = 60_000)
 			refreshNotification()
 			notifyStatusChanged()
 			return
@@ -267,13 +295,17 @@ class UnlockService : Service() {
 		store.setRuntimeStatus("正在启动 BLE 广播")
 		advertiserCallback = object : AdvertiseCallback() {
 			override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+				Log.i(TAG, "BLE advertising started")
 				store.setRuntimeStatus("BLE 广播运行中")
+				store.addEvent("BLE 广播运行正常", dedupeWindowMs = 5 * 60_000)
 				refreshNotification()
 				notifyStatusChanged()
 			}
 
 			override fun onStartFailure(errorCode: Int) {
+				Log.w(TAG, "BLE advertising failed: $errorCode")
 				store.setRuntimeStatus("BLE 广播失败（错误码 $errorCode）")
+				store.addEvent("BLE 广播失败（错误码 $errorCode）", "error", 0)
 				refreshNotification()
 				notifyStatusChanged()
 			}
@@ -320,7 +352,7 @@ class UnlockService : Service() {
 		val mode = if (store.convenienceAllowed()) "便捷模式" else "安全模式"
         return android.app.Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
-            .setContentTitle("Proximity Unlock 正在运行")
+            .setContentTitle("蓝牙解锁正在运行")
 			.setContentText("$mode · ${store.runtimeStatus()}")
             .setContentIntent(openIntent)
             .setOngoing(true)
@@ -349,6 +381,7 @@ class UnlockService : Service() {
 		const val ACTION_STATUS_CHANGED = "com.singu.proximityunlock.STATUS_CHANGED"
         private const val CHANNEL_ID = "proximity_unlock"
         private const val NOTIFICATION_ID = 1001
+		private const val TAG = "ProximityUnlock"
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, UnlockService::class.java).setAction(ACTION_START))

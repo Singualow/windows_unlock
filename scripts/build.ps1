@@ -10,6 +10,9 @@ $UserEnv = Join-Path $env:USERPROFILE 'Env'
 $GoRoot = if ($env:GOROOT) { $env:GOROOT } else { Join-Path $UserEnv 'GOROOT' }
 $Go = Join-Path $GoRoot 'bin\go.exe'
 $Gofmt = Join-Path $GoRoot 'bin\gofmt.exe'
+$Npm = Get-Command npm.cmd -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source
+$CargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+$Cargo = Join-Path $CargoBin 'cargo.exe'
 $JavaHome = if ($env:JAVA_HOME) { $env:JAVA_HOME } else {
     Get-ChildItem (Join-Path $UserEnv 'ANDROID\jdk') -Directory -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
@@ -36,6 +39,8 @@ function Invoke-Native {
 }
 
 if (-not (Test-Path $Go)) { throw "Go toolchain not found: $Go" }
+if (-not $Npm) { throw 'Node.js/npm was not found.' }
+if (-not (Test-Path $Cargo)) { throw "Rust/Cargo toolchain not found: $Cargo" }
 if (-not (Test-Path $VsWhere)) { throw 'Visual Studio Build Tools are required.' }
 if (-not $SkipAndroid) {
     if (-not $JavaHome -or -not (Test-Path $JavaHome)) { throw 'JDK 17 was not found; set JAVA_HOME.' }
@@ -44,6 +49,10 @@ if (-not $SkipAndroid) {
 }
 
 New-Item -ItemType Directory -Force -Path $Bin, $Dist | Out-Null
+$LegacyAgent = Join-Path $Bin 'ProximityUnlockAgent.exe'
+if (Test-Path $LegacyAgent) {
+    Remove-Item -LiteralPath $LegacyAgent -Force
+}
 
 Push-Location $Root
 try {
@@ -53,7 +62,6 @@ try {
     Invoke-Native { & $Go vet -unsafeptr=false -tags ble ./... } 'Go vet failed'
 
     Invoke-Native { & $Go build -trimpath -tags ble -ldflags '-s -w' -o (Join-Path $Bin 'ProximityUnlockSvc.exe') ./cmd/proximity-service } 'Service build failed'
-    Invoke-Native { & $Go build -trimpath -tags ble -ldflags '-s -w -H=windowsgui' -o (Join-Path $Bin 'ProximityUnlockAgent.exe') ./cmd/proximity-agent } 'Agent build failed'
     Invoke-Native { & $Go build -trimpath -tags ble -ldflags '-s -w' -o (Join-Path $Bin 'proximityctl.exe') ./cmd/proximityctl } 'CLI build failed'
     Invoke-Native { & $Go build -trimpath -tags ble -ldflags '-s -w -H=windowsgui' -o (Join-Path $Bin 'setup.exe') ./cmd/setup } 'Setup build failed'
 	Invoke-Native { & $Go build -trimpath -tags ble -ldflags '-s -w -H=windowsgui' -o (Join-Path $Bin 'uninstall.exe') ./cmd/setup } 'Uninstaller build failed'
@@ -64,11 +72,23 @@ try {
     Invoke-Native { & $CMake --build native\credential-provider\out --config Release } 'Credential Provider build failed'
     Copy-Item -Force native\credential-provider\out\Release\ProximityUnlockCredentialProvider.dll $Bin
 
+	$OriginalPath = $env:Path
+	$env:Path = "$CargoBin;$OriginalPath"
+	Push-Location desktop
+	try {
+		Invoke-Native { & $Npm install --no-audit --no-fund } 'Desktop dependency installation failed'
+		Invoke-Native { & $Npm run tauri build -- --no-bundle } 'Tauri desktop build failed'
+	} finally {
+		Pop-Location
+		$env:Path = $OriginalPath
+	}
+	Copy-Item -Force desktop\src-tauri\target\release\proximity-unlock-desktop.exe (Join-Path $Bin 'ProximityUnlock.exe')
+
 	$InstallerPayload = Join-Path $Root 'cmd\installer\payload'
 	New-Item -ItemType Directory -Force -Path $InstallerPayload | Out-Null
 	$InstallerFiles = @(
 		'ProximityUnlockSvc.exe',
-		'ProximityUnlockAgent.exe',
+		'ProximityUnlock.exe',
 		'proximityctl.exe',
 		'ProximityUnlockCredentialProvider.dll',
 		'setup.exe',

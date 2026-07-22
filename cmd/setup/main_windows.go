@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/singu/proximity-unlock/internal/config"
@@ -35,7 +37,7 @@ const (
 
 var files = []string{
 	"ProximityUnlockSvc.exe",
-	"ProximityUnlockAgent.exe",
+	"ProximityUnlock.exe",
 	"proximityctl.exe",
 	"ProximityUnlockCredentialProvider.dll",
 	"setup.exe",
@@ -73,6 +75,8 @@ func main() {
 		err = installStageOne()
 	case "repair-management":
 		err = repairManagementBinaries()
+	case "upgrade-ui":
+		err = upgradeUI()
 	case "enable-credential-provider":
 		err = enableCredentialProvider()
 	case "disable-credential-provider":
@@ -98,6 +102,8 @@ func main() {
 		winshell.Info("Proximity Unlock", "Windows 密码已安全更新。")
 	case "repair-management":
 		winshell.Info("Proximity Unlock", "服务诊断与安装卸载组件已更新。")
+	case "upgrade-ui":
+		// The non-elevated installer process starts the new interface after UAC exits.
 	case "uninstall":
 		winshell.Info("Proximity Unlock", "软件已卸载。仍被系统占用的文件将在重启后删除。")
 	}
@@ -204,7 +210,7 @@ func installStageOne() error {
 		rollbackStageOne(cfg.TargetSID, destination, copied)
 		return err
 	}
-	if err := setAgentRun(cfg.TargetSID, filepath.Join(destination, "ProximityUnlockAgent.exe")); err != nil {
+	if err := setAgentRun(cfg.TargetSID, filepath.Join(destination, "ProximityUnlock.exe")); err != nil {
 		rollbackStageOne(cfg.TargetSID, destination, copied)
 		return err
 	}
@@ -253,9 +259,18 @@ func copyFile(from, to string) error {
 		_ = os.Remove(temp)
 		return closeErr
 	}
-	if err := os.Rename(temp, to); err != nil {
-		_ = os.Remove(temp)
-		return err
+	var renameErr error
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		renameErr = os.Rename(temp, to)
+		if renameErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = os.Remove(temp)
+			return renameErr
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	return nil
 }
@@ -305,7 +320,11 @@ func setAgentRun(targetSID, binary string) error {
 		return err
 	}
 	defer key.Close()
-	return key.SetStringValue("ProximityUnlockAgent", `"`+binary+`"`)
+	if err := key.SetStringValue("ProximityUnlock", `"`+binary+`" --background`); err != nil {
+		return err
+	}
+	_ = key.DeleteValue("ProximityUnlockAgent")
+	return nil
 }
 
 func removeAgentRun(targetSID string) {
@@ -314,8 +333,175 @@ func removeAgentRun(targetSID string) {
 	}
 	if key, err := registry.OpenKey(registry.USERS, targetSID+`\Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE); err == nil {
 		_ = key.DeleteValue("ProximityUnlockAgent")
+		_ = key.DeleteValue("ProximityUnlock")
 		key.Close()
 	}
+}
+
+func upgradeUI() error {
+	cfg, err := config.Load(config.ProgramDataPath())
+	if err != nil || cfg.TargetSID == "" {
+		return errors.New("无法读取现有安装账户")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	sourceDir := filepath.Dir(executable)
+	names := []string{"ProximityUnlockSvc.exe", "ProximityUnlock.exe", "proximityctl.exe", "setup.exe", "uninstall.exe"}
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(sourceDir, name)); err != nil {
+			return fmt.Errorf("升级包缺少 %s: %w", name, err)
+		}
+	}
+	destination := installDir()
+	if _, err := os.Stat(destination); err != nil {
+		return errors.New("没有找到现有安装目录")
+	}
+	if err := stopInterfaceProcesses(); err != nil {
+		return err
+	}
+	serviceWasRunning, err := stopServiceForUpgrade()
+	if err != nil {
+		return fmt.Errorf("停止蓝牙解锁服务: %w", err)
+	}
+	type backup struct {
+		destination string
+		path        string
+		existed     bool
+	}
+	backups := make([]backup, 0, len(names))
+	rollback := func() {
+		for index := len(backups) - 1; index >= 0; index-- {
+			item := backups[index]
+			_ = os.Remove(item.destination)
+			if item.existed {
+				_ = copyFile(item.path, item.destination)
+			}
+			_ = os.Remove(item.path)
+		}
+		if serviceWasRunning {
+			_ = startInstalledService()
+		}
+	}
+	for _, name := range names {
+		to := filepath.Join(destination, name)
+		item := backup{destination: to, path: to + ".ui-upgrade-backup"}
+		if _, err := os.Stat(to); err == nil {
+			item.existed = true
+			if err := copyFile(to, item.path); err != nil {
+				rollback()
+				return fmt.Errorf("备份 %s: %w", name, err)
+			}
+		}
+		backups = append(backups, item)
+		if err := copyFile(filepath.Join(sourceDir, name), to); err != nil {
+			rollback()
+			return fmt.Errorf("更新 %s: %w", name, err)
+		}
+	}
+	if err := setAgentRun(cfg.TargetSID, filepath.Join(destination, "ProximityUnlock.exe")); err != nil {
+		rollback()
+		return fmt.Errorf("更新登录启动项: %w", err)
+	}
+	if serviceWasRunning {
+		if err := startInstalledService(); err != nil {
+			rollback()
+			return fmt.Errorf("启动更新后的蓝牙解锁服务: %w", err)
+		}
+	}
+	removeOrSchedule(filepath.Join(destination, "ProximityUnlockAgent.exe"))
+	for _, item := range backups {
+		_ = os.Remove(item.path)
+	}
+	return nil
+}
+
+func stopServiceForUpgrade() (bool, error) {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return false, err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(serviceName)
+	if err != nil {
+		return false, err
+	}
+	defer service.Close()
+	status, err := service.Query()
+	if err != nil {
+		return false, err
+	}
+	if status.State == svc.Stopped {
+		return false, nil
+	}
+	if status.State != svc.StopPending {
+		if _, err := service.Control(svc.Stop); err != nil {
+			return true, err
+		}
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err = service.Query()
+		if err != nil {
+			return true, err
+		}
+		if status.State == svc.Stopped {
+			return true, nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return true, errors.New("等待服务停止超时")
+}
+
+func startInstalledService() error {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(serviceName)
+	if err != nil {
+		return err
+	}
+	defer service.Close()
+	if err := service.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+		return err
+	}
+	return nil
+}
+
+func stopInterfaceProcesses() error {
+	images := []string{"ProximityUnlockAgent.exe", "ProximityUnlock.exe"}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		running := false
+		for _, image := range images {
+			command := exec.Command("taskkill.exe", "/IM", image, "/T", "/F")
+			command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			_ = command.Run()
+			if interfaceProcessRunning(image) {
+				running = true
+			}
+		}
+		if !running {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("无法结束正在运行的旧托盘，请关闭蓝牙解锁窗口后重试")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func interfaceProcessRunning(image string) bool {
+	command := exec.Command("tasklist.exe", "/FI", "IMAGENAME eq "+image, "/FO", "CSV", "/NH")
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	output, err := command.Output()
+	if err != nil {
+		return true
+	}
+	return strings.Contains(strings.ToLower(string(output)), strings.ToLower(image))
 }
 
 func enableCredentialProvider() error {

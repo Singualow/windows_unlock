@@ -38,15 +38,50 @@ type Coordinator struct {
 	authorizer *authorize.Manager
 	replay     *protocol.ReplayGuard
 
-	activeSession uint32
-	sessionActive bool
-	locked        bool
-	challengeBusy bool
-	lastChallenge time.Time
-	pairing       *pendingPairing
-	sessionValid  func(uint32) bool
-	lastCPEvent   string
-	lastCPEventAt time.Time
+	activeSession         uint32
+	sessionActive         bool
+	locked                bool
+	challengeBusy         bool
+	lastChallenge         time.Time
+	pairing               *pendingPairing
+	sessionValid          func(uint32) bool
+	lastCPEvent           string
+	lastCPEventAt         time.Time
+	lastAuthFailureCode   string
+	lastAuthFailureReason string
+	lastAuthFailureAt     time.Time
+	authFailureActive     bool
+	authLogger            func(AuthenticationLogEntry)
+	lastAuthLogCode       string
+	lastAuthLogAt         time.Time
+}
+
+type AuthenticationLogEntry struct {
+	Warning bool
+	Code    string
+	Message string
+}
+
+type authenticationError struct {
+	code     string
+	message  string
+	security bool
+	cause    error
+}
+
+func (e *authenticationError) Error() string { return e.message }
+func (e *authenticationError) Unwrap() error { return e.cause }
+
+func authError(code, message string, security bool, cause error) error {
+	return &authenticationError{code: code, message: message, security: security, cause: cause}
+}
+
+func classifyAuthenticationError(err error) *authenticationError {
+	var failure *authenticationError
+	if errors.As(err, &failure) {
+		return failure
+	}
+	return &authenticationError{code: "local_error", message: "电脑端认证处理失败", cause: err}
 }
 
 func (c *Coordinator) SetSessionValidator(validator func(uint32) bool) {
@@ -55,30 +90,42 @@ func (c *Coordinator) SetSessionValidator(validator func(uint32) bool) {
 	c.sessionValid = validator
 }
 
+func (c *Coordinator) SetAuthenticationLogger(logger func(AuthenticationLogEntry)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authLogger = logger
+}
+
 type pendingPairing struct {
 	secret    [32]byte
 	expiresAt time.Time
 }
 
 type Status struct {
-	Configured        bool               `json:"configured"`
-	Paired            bool               `json:"paired"`
-	CredentialValid   bool               `json:"credential_valid"`
-	Mode              string             `json:"mode"`
-	AutoLock          bool               `json:"auto_lock"`
-	ImmediateUnlock   bool               `json:"immediate_unlock"`
-	PausedUntil       time.Time          `json:"paused_until,omitempty"`
-	SessionActive     bool               `json:"session_active"`
-	Locked            bool               `json:"locked"`
-	MedianRSSI        int                `json:"median_rssi,omitempty"`
-	HasRSSI           bool               `json:"has_rssi"`
-	LastAuthenticated time.Time          `json:"last_authenticated,omitempty"`
-	ShouldLock        bool               `json:"should_lock"`
-	BLEBackend        string             `json:"ble_backend"`
-	Authorization     authorize.Snapshot `json:"authorization"`
-	CooldownUntil     time.Time          `json:"cooldown_until,omitempty"`
-	LastCPEvent       string             `json:"last_credential_provider_event,omitempty"`
-	LastCPEventAt     time.Time          `json:"last_credential_provider_event_at,omitempty"`
+	Configured            bool               `json:"configured"`
+	Paired                bool               `json:"paired"`
+	CredentialValid       bool               `json:"credential_valid"`
+	Mode                  string             `json:"mode"`
+	AutoLock              bool               `json:"auto_lock"`
+	ImmediateUnlock       bool               `json:"immediate_unlock"`
+	FailureCooldown       bool               `json:"failure_cooldown_enabled"`
+	PausedUntil           time.Time          `json:"paused_until,omitempty"`
+	SessionActive         bool               `json:"session_active"`
+	Locked                bool               `json:"locked"`
+	MedianRSSI            int                `json:"median_rssi,omitempty"`
+	HasRSSI               bool               `json:"has_rssi"`
+	LastAuthenticated     time.Time          `json:"last_authenticated,omitempty"`
+	ShouldLock            bool               `json:"should_lock"`
+	BLEBackend            string             `json:"ble_backend"`
+	Authorization         authorize.Snapshot `json:"authorization"`
+	CooldownUntil         time.Time          `json:"cooldown_until,omitempty"`
+	LastAuthFailureCode   string             `json:"last_authentication_failure_code,omitempty"`
+	LastAuthFailureReason string             `json:"last_authentication_failure_reason,omitempty"`
+	LastAuthFailureAt     time.Time          `json:"last_authentication_failure_at,omitempty"`
+	LastCPEvent           string             `json:"last_credential_provider_event,omitempty"`
+	LastCPEventAt         time.Time          `json:"last_credential_provider_event_at,omitempty"`
+	UnlockRSSI            int                `json:"unlock_rssi"`
+	LockRSSI              int                `json:"lock_rssi"`
 }
 
 func New(configPath string, cfg config.Config, secrets secret.Store, signer Signer, transport ble.Transport, authorizer *authorize.Manager) *Coordinator {
@@ -104,6 +151,7 @@ func settingsFor(cfg config.Config) proximity.Settings {
 	settings.ProofTimeout = time.Duration(cfg.Thresholds.ProofTimeoutMS) * time.Millisecond
 	settings.ManualHoldAway = time.Duration(cfg.Thresholds.ManualHoldAwayMS) * time.Millisecond
 	settings.ImmediateUnlock = cfg.ImmediateUnlock
+	settings.FailureCooldownOn = cfg.FailureCooldown
 	return settings
 }
 
@@ -166,24 +214,30 @@ func (c *Coordinator) Status(now time.Time) Status {
 	}
 	shouldLock := c.config.AutoLock && c.sessionActive && !c.locked && !pausedUntil.After(now) && c.state.ShouldAutoLock(now)
 	return Status{
-		Configured:        c.config.TargetSID != "" && c.config.PCID != "",
-		Paired:            c.config.PhoneID != "",
-		CredentialValid:   c.config.CredentialValid,
-		Mode:              c.config.Mode,
-		AutoLock:          c.config.AutoLock,
-		ImmediateUnlock:   c.config.ImmediateUnlock,
-		PausedUntil:       pausedUntil,
-		SessionActive:     c.sessionActive,
-		Locked:            c.locked,
-		MedianRSSI:        rssi,
-		HasRSSI:           hasRSSI,
-		LastAuthenticated: c.state.LastProof(),
-		ShouldLock:        shouldLock,
-		BLEBackend:        c.transport.Backend(),
-		Authorization:     c.authorizer.Snapshot(now),
-		CooldownUntil:     c.state.CooldownUntil(),
-		LastCPEvent:       c.lastCPEvent,
-		LastCPEventAt:     c.lastCPEventAt,
+		Configured:            c.config.TargetSID != "" && c.config.PCID != "",
+		Paired:                c.config.PhoneID != "",
+		CredentialValid:       c.config.CredentialValid,
+		Mode:                  c.config.Mode,
+		AutoLock:              c.config.AutoLock,
+		ImmediateUnlock:       c.config.ImmediateUnlock,
+		FailureCooldown:       c.config.FailureCooldown,
+		PausedUntil:           pausedUntil,
+		SessionActive:         c.sessionActive,
+		Locked:                c.locked,
+		MedianRSSI:            rssi,
+		HasRSSI:               hasRSSI,
+		LastAuthenticated:     c.state.LastProof(),
+		ShouldLock:            shouldLock,
+		BLEBackend:            c.transport.Backend(),
+		Authorization:         c.authorizer.Snapshot(now),
+		CooldownUntil:         c.state.CooldownUntil(),
+		LastAuthFailureCode:   c.lastAuthFailureCode,
+		LastAuthFailureReason: c.lastAuthFailureReason,
+		LastAuthFailureAt:     c.lastAuthFailureAt,
+		LastCPEvent:           c.lastCPEvent,
+		LastCPEventAt:         c.lastCPEventAt,
+		UnlockRSSI:            c.config.Thresholds.UnlockRSSI,
+		LockRSSI:              c.config.Thresholds.LockRSSI,
 	}
 }
 
@@ -243,6 +297,21 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 			return ipc.ControlResponse{Error: err.Error()}
 		}
 		c.state.SetImmediateUnlock(*payload.Enabled)
+		return ipc.ControlResponse{OK: true}
+	case "set_failure_cooldown":
+		var payload struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if json.Unmarshal(request.Payload, &payload) != nil || payload.Enabled == nil {
+			return ipc.ControlResponse{Error: "invalid failure-cooldown request"}
+		}
+		if err := c.updateConfig(func(cfg *config.Config) { cfg.FailureCooldown = *payload.Enabled }); err != nil {
+			return ipc.ControlResponse{Error: err.Error()}
+		}
+		c.mu.Lock()
+		settings := settingsFor(c.config)
+		c.mu.Unlock()
+		c.state.UpdateSettings(settings)
 		return ipc.ControlResponse{OK: true}
 	case "set_thresholds":
 		var payload struct {
@@ -435,10 +504,42 @@ func (c *Coordinator) handleCandidate(ctx context.Context, candidate ble.Candida
 			c.challengeBusy = false
 			c.mu.Unlock()
 		}()
-		if err := c.authenticate(ctx, candidate); err != nil {
-			c.state.RecordFailure(time.Now())
-		}
+		c.recordAuthenticationResult(c.authenticate(ctx, candidate))
 	}()
+}
+
+func (c *Coordinator) recordAuthenticationResult(err error) {
+	now := time.Now()
+	if err == nil {
+		c.mu.Lock()
+		wasFailing := c.authFailureActive
+		c.authFailureActive = false
+		logger := c.authLogger
+		c.mu.Unlock()
+		if wasFailing && logger != nil {
+			logger(AuthenticationLogEntry{Code: "authentication_recovered", Message: "手机认证已恢复"})
+		}
+		return
+	}
+	failure := classifyAuthenticationError(err)
+	c.mu.Lock()
+	c.lastAuthFailureCode = failure.code
+	c.lastAuthFailureReason = failure.message
+	c.lastAuthFailureAt = now
+	logger := c.authLogger
+	shouldLog := c.lastAuthLogCode != failure.code || now.Sub(c.lastAuthLogAt) >= 30*time.Second
+	if shouldLog {
+		c.lastAuthLogCode = failure.code
+		c.lastAuthLogAt = now
+		c.authFailureActive = true
+	}
+	c.mu.Unlock()
+	if failure.security {
+		c.state.RecordFailure(now)
+	}
+	if shouldLog && logger != nil {
+		logger(AuthenticationLogEntry{Warning: true, Code: failure.code, Message: failure.message})
+	}
 }
 
 func (c *Coordinator) authenticate(parent context.Context, candidate ble.Candidate) error {
@@ -449,37 +550,40 @@ func (c *Coordinator) authenticate(parent context.Context, candidate ble.Candida
 	c.mu.Unlock()
 	mode, err := protocol.ParseMode(cfg.Mode)
 	if err != nil {
-		return err
+		return authError("config_invalid", "解锁模式配置无效", false, err)
 	}
 	pcID, err := decodeID(cfg.PCID)
 	if err != nil {
-		return err
+		return authError("config_invalid", "电脑标识配置无效", false, err)
 	}
 	phoneID, err := decodeID(cfg.PhoneID)
 	if err != nil {
-		return err
+		return authError("config_invalid", "手机标识配置无效", false, err)
 	}
 	challenge, err := protocol.NewChallenge(mode, pcID, phoneID, sessionID, cfg.TargetSID, time.Now())
 	if err != nil {
-		return err
+		return authError("challenge_create_failed", "无法创建新鲜挑战", false, err)
 	}
 	challenge.Signature, err = c.signer.Sign(challenge.SigningBytes())
 	if err != nil {
-		return err
+		return authError("pc_signing_failed", "电脑身份密钥签名失败", false, err)
 	}
 	wire, err := challenge.MarshalBinary()
 	if err != nil {
-		return err
+		return authError("challenge_encode_failed", "无法编码蓝牙挑战", false, err)
 	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	responseWire, err := c.transport.Exchange(ctx, candidate, protocol.MessageChallenge, wire)
 	if err != nil {
-		return err
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return authError("transport_timeout", "BLE 挑战响应超时", false, err)
+		}
+		return authError("transport_failure", "BLE GATT 挑战交换失败", false, err)
 	}
 	response, err := protocol.ParseResponse(responseWire)
 	if err != nil || !response.Matches(challenge, time.Now()) {
-		return errors.New("phone response did not match challenge")
+		return authError("response_invalid", "手机响应格式或挑战绑定无效", true, err)
 	}
 	keyData := cfg.PhoneStrictKey
 	if mode == protocol.ModeConvenience {
@@ -487,18 +591,20 @@ func (c *Coordinator) authenticate(parent context.Context, candidate ble.Candida
 	}
 	publicBytes, err := base64.RawURLEncoding.DecodeString(keyData)
 	if err != nil {
-		return err
+		return authError("config_invalid", "手机公钥配置无效", false, err)
 	}
 	publicKey, err := windowskey.ParsePublic(publicBytes)
 	if err != nil || !protocol.VerifyP256(publicKey, response.SigningBytes(), response.Signature[:]) {
-		return errors.New("phone signature verification failed")
+		return authError("signature_invalid", "手机签名验证失败", true, err)
 	}
 	if err := c.replay.Accept(response.Nonce, response.Counter, time.Now()); err != nil {
-		return err
+		return authError("replay_rejected", "手机响应计数器或 nonce 重放被拒绝", true, err)
 	}
 	c.state.RecordProof(time.Now())
 	if locked {
-		return c.authorizer.Grant(sessionID, time.Now())
+		if err := c.authorizer.Grant(sessionID, time.Now()); err != nil {
+			return authError("authorization_failed", "无法创建一次性解锁授权", false, err)
+		}
 	}
 	return nil
 }

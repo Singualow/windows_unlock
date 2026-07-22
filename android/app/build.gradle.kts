@@ -16,8 +16,8 @@ android {
         applicationId = "com.singu.proximityunlock"
         minSdk = 35
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.1.4"
+        versionCode = 7
+        versionName = "0.2.0"
     }
 
 	signingConfigs {

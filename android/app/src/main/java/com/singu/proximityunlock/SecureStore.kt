@@ -5,6 +5,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -120,6 +122,37 @@ class SecureStore(private val context: Context) {
 	fun setRuntimeStatus(status: String) = prefs.edit().putString("runtime_status", status).apply()
 	fun runtimeStatus(): String = prefs.getString("runtime_status", "尚未启动") ?: "尚未启动"
 
+    data class SafeEvent(val at: Long, val message: String, val tone: String)
+
+    @Synchronized
+    fun addEvent(message: String, tone: String = "info", dedupeWindowMs: Long = 30_000) {
+        val now = System.currentTimeMillis()
+        val current = events().toMutableList()
+        if (dedupeWindowMs > 0 && current.any { it.message == message && now - it.at < dedupeWindowMs }) return
+        current.add(0, SafeEvent(now, message.take(80), tone))
+        val encoded = JSONArray()
+        current.take(MAX_SAFE_EVENTS).forEach { event ->
+            encoded.put(JSONObject().put("at", event.at).put("message", event.message).put("tone", event.tone))
+        }
+        prefs.edit().putString("safe_events", encoded.toString()).apply()
+    }
+
+    @Synchronized
+    fun events(): List<SafeEvent> = try {
+        val source = JSONArray(prefs.getString("safe_events", "[]") ?: "[]")
+        buildList {
+            for (index in 0 until source.length()) {
+                val item = source.optJSONObject(index) ?: continue
+                val message = item.optString("message").takeIf { it.isNotBlank() } ?: continue
+                add(SafeEvent(item.optLong("at"), message, item.optString("tone", "info")))
+            }
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    fun clearEvents() = prefs.edit().remove("safe_events").apply()
+
     fun clearPairing() {
 		prefs.edit().remove("pc_id").remove("pc_public").remove("pair_secret").remove("pair_expiry")
 			.remove("presence_key").remove("counter").remove("runtime_status").putBoolean("enabled", false).commit()
@@ -194,5 +227,6 @@ class SecureStore(private val context: Context) {
         private const val STRICT_ALIAS = "ProximityUnlock.Strict.v1"
         private const val RELAXED_ALIAS = "ProximityUnlock.Relaxed.v1"
         private const val ENCRYPTION_ALIAS = "ProximityUnlock.Secrets.v1"
+        private const val MAX_SAFE_EVENTS = 16
     }
 }

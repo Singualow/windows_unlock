@@ -25,3 +25,8 @@ native/**/out/
 coverage.out
 cmd/installer/payload/*.exe
 cmd/installer/payload/*.dll
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+/artifacts/

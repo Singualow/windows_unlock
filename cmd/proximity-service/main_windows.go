@@ -64,7 +64,17 @@ func (serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, sta
 	var coord *coordinator.Coordinator
 	go func() {
 		var err error
-		coord, err = startRuntime(ctx)
+		coord, err = startRuntime(ctx, func(entry coordinator.AuthenticationLogEntry) {
+			if logger == nil {
+				return
+			}
+			message := fmt.Sprintf("authentication [%s]: %s", entry.Code, entry.Message)
+			if entry.Warning {
+				_ = logger.Warning(2, message)
+				return
+			}
+			_ = logger.Info(3, message)
+		})
 		ready <- err
 	}()
 	if err := <-ready; err != nil {
@@ -109,7 +119,9 @@ func (serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, sta
 }
 
 func runRuntime(ctx context.Context, result chan<- *coordinator.Coordinator) error {
-	coord, err := startRuntime(ctx)
+	coord, err := startRuntime(ctx, func(entry coordinator.AuthenticationLogEntry) {
+		log.Printf("authentication [%s]: %s", entry.Code, entry.Message)
+	})
 	if err != nil {
 		return err
 	}
@@ -120,7 +132,7 @@ func runRuntime(ctx context.Context, result chan<- *coordinator.Coordinator) err
 	return coord.Close()
 }
 
-func startRuntime(ctx context.Context) (*coordinator.Coordinator, error) {
+func startRuntime(ctx context.Context, authLogger func(coordinator.AuthenticationLogEntry)) (*coordinator.Coordinator, error) {
 	path := config.ProgramDataPath()
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -140,6 +152,7 @@ func startRuntime(ctx context.Context) (*coordinator.Coordinator, error) {
 	}
 	coord := coordinator.New(path, cfg, secret.NewLSAStore(), key, transport, authorizer)
 	coord.SetSessionValidator(winsession.IsActiveConsole)
+	coord.SetAuthenticationLogger(authLogger)
 	servers, err := ipc.Listen(cfg.TargetSID, coord.HandleControl, coord.HandleAuth)
 	if err != nil {
 		key.Close()

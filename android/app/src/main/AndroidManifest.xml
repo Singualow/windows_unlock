@@ -12,7 +12,7 @@
     <application
         android:allowBackup="false"
         android:fullBackupContent="false"
-        android:label="Proximity Unlock"
+        android:label="蓝牙解锁"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">

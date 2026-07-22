@@ -25,7 +25,7 @@ var payload embed.FS
 
 var payloadFiles = []string{
 	"ProximityUnlockSvc.exe",
-	"ProximityUnlockAgent.exe",
+	"ProximityUnlock.exe",
 	"proximityctl.exe",
 	"ProximityUnlockCredentialProvider.dll",
 	"setup.exe",
@@ -52,7 +52,7 @@ func main() {
 
 	if !winshell.Confirm(
 		"安装 Proximity Unlock",
-		"将安装 Windows 蓝牙解锁服务并直接启动托盘。\n\n安装期间会出现管理员确认，并要求输入当前 Windows/Microsoft 账户密码（不能使用 PIN）。系统 PIN、密码和 Windows Hello 不会被隐藏。\n\n点击“确定”继续。",
+		"将安装或升级 Windows 蓝牙解锁服务与中文可视化托盘。\n\n首次安装会出现管理员确认，并要求输入当前 Windows/Microsoft 账户密码（不能使用 PIN）。升级会保留手机配对、密码和现有解锁组件。系统 PIN、密码和 Windows Hello 不会被隐藏。\n\n点击“确定”继续。",
 	) {
 		return
 	}
@@ -70,12 +70,12 @@ func main() {
 		winshell.Error("Proximity Unlock 安装失败", fmt.Sprintf("安装进程返回错误代码 %d。", exitCode))
 		return
 	}
-	agent := filepath.Join(programFiles(), "ProximityUnlock", "ProximityUnlockAgent.exe")
-	if err := exec.Command(agent).Start(); err != nil {
+	interfaceBinary := filepath.Join(programFiles(), "ProximityUnlock", "ProximityUnlock.exe")
+	if err := exec.Command(interfaceBinary).Start(); err != nil {
 		winshell.Error("Proximity Unlock", "安装已完成，但托盘启动失败。下次登录会自动启动。\n"+err.Error())
 		return
 	}
-	winshell.Info("Proximity Unlock", "安装完成，托盘已经启动。\n\n请从托盘菜单选择“配对手机…”，配对成功后再勾选“启用 Windows 锁屏自动解锁”。")
+	winshell.Info("Proximity Unlock", "安装或升级完成，中文控制中心已经启动。\n\n手机配对和现有自动解锁配置已保留；首次安装请在“设备”页面完成配对。")
 }
 
 func install() error {
@@ -83,9 +83,8 @@ func install() error {
 		return fmt.Errorf("安装包完整性检查失败：%w", err)
 	}
 	installDir := filepath.Join(programFiles(), "ProximityUnlock")
-	if entries, err := os.ReadDir(installDir); err == nil && len(entries) != 0 {
-		return errors.New("软件已经安装。请直接使用任务栏托盘；如需重装，请先运行已安装目录中的 uninstall.exe。")
-	}
+	entries, readInstallErr := os.ReadDir(installDir)
+	upgrade := readInstallErr == nil && len(entries) != 0
 	tempDir, err := os.MkdirTemp("", "ProximityUnlockInstaller-*")
 	if err != nil {
 		return err
@@ -102,6 +101,12 @@ func install() error {
 	}
 	if err := runHidden(ctl, "self-test"); err != nil {
 		return fmt.Errorf("安全自检失败：%w", err)
+	}
+	if upgrade {
+		if err := runHidden(filepath.Join(tempDir, "setup.exe"), "upgrade-ui"); err != nil {
+			return fmt.Errorf("软件就地升级失败：%w", err)
+		}
+		return nil
 	}
 	if err := runHidden(filepath.Join(tempDir, "setup.exe"), "install"); err != nil {
 		return fmt.Errorf("Windows 服务安装失败：%w", err)

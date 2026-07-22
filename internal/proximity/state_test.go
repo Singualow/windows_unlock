@@ -94,6 +94,41 @@ func TestFailureCooldown(t *testing.T) {
 	}
 }
 
+func TestFailureCooldownCanBeDisabledAndClearsActiveCooldown(t *testing.T) {
+	settings := DefaultSettings()
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	for i := 0; i < 3; i++ {
+		s.RecordFailure(now.Add(time.Duration(i) * time.Second))
+	}
+	if s.CooldownUntil().IsZero() {
+		t.Fatal("test did not create a cooldown")
+	}
+	settings.FailureCooldownOn = false
+	s.UpdateSettings(settings)
+	if !s.CooldownUntil().IsZero() || !s.CanAuthenticate(now.Add(3*time.Second)) {
+		t.Fatal("disabling cooldown did not immediately restore authentication")
+	}
+	for i := 0; i < 5; i++ {
+		s.RecordFailure(now.Add(time.Duration(i+4) * time.Second))
+	}
+	if !s.CooldownUntil().IsZero() {
+		t.Fatal("disabled cooldown still accumulated failures")
+	}
+}
+
+func TestSuccessfulProofClearsExpiredFailureState(t *testing.T) {
+	s := NewState(DefaultSettings())
+	now := time.Unix(1_800_000_000, 0)
+	for i := 0; i < 3; i++ {
+		s.RecordFailure(now.Add(time.Duration(i) * time.Second))
+	}
+	s.RecordProof(now.Add(6 * time.Minute))
+	if !s.CooldownUntil().IsZero() {
+		t.Fatal("successful proof did not clear cooldown state")
+	}
+}
+
 func TestResetDeviceEvidenceClearsOldPhoneState(t *testing.T) {
 	s := NewState(DefaultSettings())
 	now := time.Unix(1_800_000_000, 0)
