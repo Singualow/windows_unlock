@@ -9,6 +9,8 @@ let previewStatus: ServiceStatus = {
   mode: "strict",
   auto_lock: true,
   high_sensitivity: false,
+  doppler_prediction: false,
+  doppler_sensitivity: 60,
   immediate_unlock: false,
   failure_cooldown_enabled: true,
   session_active: true,
@@ -28,6 +30,15 @@ let previewStatus: ServiceStatus = {
   unlock_rssi: -65,
   lock_rssi: -80,
   high_sensitivity_rssi: -55,
+  recent_events: [
+    { id: 1, at: new Date(now - 150_000).toISOString(), kind: "service", code: "service_started", message: "蓝牙解锁服务已启动", detail: "BLE 扫描、会话监视和认证状态机已就绪", result: "运行中", warning: false },
+    { id: 2, at: new Date(now - 125_000).toISOString(), kind: "session", code: "session_locked", message: "Windows 已进入锁屏", detail: "等待手机返回并完成新鲜挑战", result: "已锁定", warning: false },
+    { id: 3, at: new Date(now - 110_000).toISOString(), kind: "authentication", code: "transport_timeout", message: "认证失败：BLE 挑战响应超时", detail: "错误代码：transport_timeout；将继续认证，连续失败满 10 秒后才允许自动锁定", result: "失败", warning: true },
+    { id: 4, at: new Date(now - 83_000).toISOString(), kind: "authentication", code: "authentication_recovered", message: "手机认证已恢复", detail: "电脑签名、手机签名、nonce、计数器和目标会话校验通过", result: "成功", warning: false },
+    { id: 5, at: new Date(now - 80_000).toISOString(), kind: "authorization", code: "authorization_granted", message: "一次性解锁授权已就绪", detail: "授权将在短时间内过期且只能消费一次", result: "待消费", warning: false },
+    { id: 6, at: new Date(now - 75_000).toISOString(), kind: "credential", code: "credential_consumed", message: "自动解锁凭据已安全提交", detail: "仅向当前锁定会话提交一次，授权消费后立即失效", result: "已提交", warning: false },
+    { id: 7, at: new Date(now - 70_000).toISOString(), kind: "credential", code: "unlock_success", message: "Windows 已接受自动解锁凭据", detail: "一次性授权已消费并清除", result: "成功", warning: false },
+  ],
 };
 
 export const isDesktopRuntime = isTauri();
@@ -64,6 +75,30 @@ export async function setHighSensitivity(enabled: boolean): Promise<void> {
     return;
   }
   await invoke("set_high_sensitivity", { enabled });
+}
+
+export async function setDopplerPrediction(enabled: boolean): Promise<void> {
+  if (!isDesktopRuntime) {
+    previewStatus = { ...previewStatus, doppler_prediction: enabled };
+    return;
+  }
+  await invoke("set_doppler_prediction", { enabled });
+}
+
+export async function setDopplerSensitivity(sensitivity: number): Promise<void> {
+  if (!isDesktopRuntime) {
+    previewStatus = { ...previewStatus, doppler_sensitivity: sensitivity };
+    return;
+  }
+  await invoke("set_doppler_sensitivity", { sensitivity });
+}
+
+export async function setHighSensitivityThreshold(rssi: number): Promise<void> {
+  if (!isDesktopRuntime) {
+    previewStatus = { ...previewStatus, high_sensitivity_rssi: rssi };
+    return;
+  }
+  await invoke("set_high_sensitivity_threshold", { rssi });
 }
 
 export async function setImmediateUnlock(enabled: boolean): Promise<void> {

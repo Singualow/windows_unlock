@@ -49,6 +49,12 @@ export function HeroStatus({ status, error, loading, onLock, onManageDevice }: H
               高灵敏响应
             </span>
           ) : null}
+          {status?.doppler_prediction ? (
+            <span className="status-chip violet">
+              <Icon name="signal" size={17} />
+              趋势预测
+            </span>
+          ) : null}
         </div>
         <div className="hero-actions">
           <button className="primary-button" type="button" onClick={onLock}>

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -156,7 +157,7 @@ func TestHighSensitivityControlIsPersistedAndReported(t *testing.T) {
 		t.Fatal("high-sensitivity preference was not saved")
 	}
 	settings := settingsFor(saved)
-	if settings.ProofTimeout != 4*time.Second || settings.LockWindow != 2*time.Second || settings.RequiredNearSamples != 1 {
+	if settings.ProofTimeout != 10*time.Second || settings.LockWindow != 10*time.Second || settings.RequiredNearSamples != 1 {
 		t.Fatalf("unexpected high-sensitivity profile: %+v", settings)
 	}
 	if settings.UnlockRSSI != saved.Thresholds.HighSensitivityRSSI || settings.LockRSSI != saved.Thresholds.HighSensitivityRSSI-8 {
@@ -194,6 +195,85 @@ func TestHighSensitivityThresholdControlIsPersistedAndReported(t *testing.T) {
 	}
 }
 
+func TestDedicatedHighSensitivityThresholdControl(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cfg := config.Default()
+	path := t.TempDir() + "/config.json"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := New(path, cfg, secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	response := c.HandleControl(context.Background(), mustRequest("set_high_sensitivity_threshold", map[string]any{"rssi": -51}))
+	if !response.OK || c.Status(time.Now()).HighSensitivityRSSI != -51 {
+		t.Fatalf("dedicated high-sensitivity threshold control failed: %s", response.Error)
+	}
+	saved, err := config.Load(path)
+	if err != nil || saved.Thresholds.HighSensitivityRSSI != -51 {
+		t.Fatal("dedicated high-sensitivity threshold was not saved")
+	}
+}
+
+func TestDopplerControlsArePersistedAndUseFastRevalidation(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cfg := config.Default()
+	path := t.TempDir() + "/config.json"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := New(path, cfg, secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	if response := c.HandleControl(context.Background(), mustRequest("set_doppler_prediction", map[string]any{"enabled": true})); !response.OK {
+		t.Fatalf("doppler toggle failed: %s", response.Error)
+	}
+	if response := c.HandleControl(context.Background(), mustRequest("set_doppler_sensitivity", map[string]any{"sensitivity": 84})); !response.OK {
+		t.Fatalf("doppler sensitivity failed: %s", response.Error)
+	}
+	status := c.Status(time.Now())
+	if !status.DopplerPrediction || status.DopplerSensitivity != 84 {
+		t.Fatalf("doppler status was not updated: %+v", status)
+	}
+	saved, err := config.Load(path)
+	if err != nil || !saved.DopplerPrediction || saved.DopplerSensitivity != 84 {
+		t.Fatal("doppler settings were not persisted")
+	}
+	settings := settingsFor(saved)
+	if !settings.DopplerPrediction || settings.DopplerSensitivity != 84 || settings.ProofTimeout != 10*time.Second {
+		t.Fatalf("unexpected doppler state profile: %+v", settings)
+	}
+	if challengeIntervalFor(saved, true) != 200*time.Millisecond || authenticationTimeoutFor(saved) != 1500*time.Millisecond {
+		t.Fatal("doppler mode did not enable fast authentication polling")
+	}
+}
+
+func TestDopplerPredictiveUnlockGuardRelocksWithAutoLockDisabled(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cfg := config.Default()
+	cfg.AutoLock = false
+	cfg.DopplerPrediction = true
+	c := New("unused", cfg, secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	started := time.Now()
+	c.MarkSessionActive(1)
+	c.MarkLocked(1, started)
+	c.mu.Lock()
+	c.predictionUnlockPending = true
+	c.predictionUnlockPendingAt = started
+	c.mu.Unlock()
+	c.MarkSessionActive(1)
+	c.state.RecordAttemptFailure(started.Add(time.Second))
+	if c.Status(started.Add(9 * time.Second)).ShouldLock {
+		t.Fatal("prediction guard relocked before the complete 10-second failure window")
+	}
+	if !c.Status(started.Add(12 * time.Second)).ShouldLock {
+		t.Fatal("prediction guard did not relock after 10 seconds when ordinary auto-lock was disabled")
+	}
+
+	ordinary := New("unused", cfg, secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	ordinary.MarkSessionActive(1)
+	ordinary.state.RecordAttemptFailure(started.Add(time.Second))
+	if ordinary.Status(started.Add(12 * time.Second)).ShouldLock {
+		t.Fatal("ordinary unlocked desktop inherited the prediction-only relock guard")
+	}
+}
+
 func TestLegacyThresholdControlPreservesHighSensitivityThreshold(t *testing.T) {
 	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	cfg := config.Default()
@@ -225,19 +305,50 @@ func TestTransientTransportFailuresDoNotTriggerSecurityCooldown(t *testing.T) {
 	}
 }
 
-func TestAuthenticationRecoveryLogMatchesRateLimitedFailure(t *testing.T) {
+func TestAuthenticationLogSuppressesConsecutiveDuplicateOutcomes(t *testing.T) {
 	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	c := New("unused", config.Default(), secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
 	var entries []AuthenticationLogEntry
 	c.SetAuthenticationLogger(func(entry AuthenticationLogEntry) { entries = append(entries, entry) })
 
-	c.recordAuthenticationResult(authError("transport_timeout", "BLE 挑战响应超时", false, context.DeadlineExceeded))
-	c.recordAuthenticationResult(nil)
-	c.recordAuthenticationResult(authError("transport_timeout", "BLE 挑战响应超时", false, context.DeadlineExceeded))
-	c.recordAuthenticationResult(nil)
+	for range 3 {
+		c.recordAuthenticationResult(authError("transport_timeout", "BLE 挑战响应超时", false, context.DeadlineExceeded))
+	}
+	for range 3 {
+		c.recordAuthenticationResult(nil)
+	}
+	for range 2 {
+		c.recordAuthenticationResult(authError("transport_timeout", "BLE 挑战响应超时", false, context.DeadlineExceeded))
+	}
+	for range 2 {
+		c.recordAuthenticationResult(nil)
+	}
 
-	if len(entries) != 2 || !entries[0].Warning || entries[1].Code != "authentication_recovered" {
-		t.Fatalf("expected one failure/recovery pair, got %#v", entries)
+	if len(entries) != 4 || !entries[0].Warning || entries[1].Code != "authentication_recovered" || !entries[2].Warning || entries[3].Code != "authentication_recovered" {
+		t.Fatalf("expected two deduplicated failure/recovery transitions, got %#v", entries)
+	}
+}
+
+func TestRecentEventsKeepLatestHundredAndDeduplicateConsecutiveEntries(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	c := New("unused", config.Default(), secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	now := time.Unix(1_800_000_000, 0)
+	for index := range 110 {
+		code := fmt.Sprintf("event_%03d", index)
+		c.appendEvent(now.Add(time.Duration(index)*time.Second), "service", code, "测试事件", code, "完成", false)
+	}
+	status := c.Status(now.Add(2 * time.Minute))
+	if len(status.RecentEvents) != 100 {
+		t.Fatalf("expected 100 recent events, got %d", len(status.RecentEvents))
+	}
+	if status.RecentEvents[0].Code != "event_010" || status.RecentEvents[99].Code != "event_109" {
+		t.Fatalf("unexpected retained event range: %s ... %s", status.RecentEvents[0].Code, status.RecentEvents[99].Code)
+	}
+	if c.appendEvent(now.Add(3*time.Minute), "service", "event_109", "测试事件", "event_109", "完成", false) {
+		t.Fatal("consecutive duplicate event was appended")
+	}
+	if got := len(c.Status(now.Add(3 * time.Minute)).RecentEvents); got != 100 {
+		t.Fatalf("duplicate changed ring size to %d", got)
 	}
 }
 

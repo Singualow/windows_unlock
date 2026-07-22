@@ -18,6 +18,11 @@ export interface ServiceStatus {
   mode: UnlockMode;
   auto_lock: boolean;
   high_sensitivity: boolean;
+  doppler_prediction: boolean;
+  doppler_sensitivity: number;
+  doppler_triggered?: boolean;
+  predicted_rssi?: number;
+  rssi_slope_db_per_sec?: number;
   immediate_unlock: boolean;
   failure_cooldown_enabled: boolean;
   paused_until?: string;
@@ -38,6 +43,18 @@ export interface ServiceStatus {
   unlock_rssi?: number;
   lock_rssi?: number;
   high_sensitivity_rssi?: number;
+  recent_events?: ServiceLogEntry[];
+}
+
+export interface ServiceLogEntry {
+  id: number;
+  at: string;
+  kind: "service" | "authentication" | "session" | "authorization" | "credential" | "configuration" | "pairing";
+  code: string;
+  message: string;
+  detail?: string;
+  result: string;
+  warning: boolean;
 }
 
 export interface SignalPoint {
@@ -54,6 +71,8 @@ export interface SecurityEvent {
   tone: EventTone;
   icon: "shield" | "key" | "credential" | "signal";
   warning?: boolean;
+  detail?: string;
+  result?: string;
 }
 
 export interface PairingPayload {

@@ -11,22 +11,18 @@ interface SignalChartProps {
 }
 
 const bounds = { left: 68, right: 814, top: 18, bottom: 176 };
+const historyMilliseconds = 10 * 60 * 1_000;
 
 function yFor(value: number) {
   const clamped = Math.max(-85, Math.min(-35, value));
   return bounds.top + ((-35 - clamped) / 50) * (bounds.bottom - bounds.top);
 }
 
-function chartCoordinates(points: SignalPoint[]) {
+function chartCoordinates(points: SignalPoint[], now: number) {
   if (!points.length) return [];
-  const first = points[0].at;
-  const last = points.at(-1)?.at ?? first;
-  const span = Math.max(1, last - first);
+  const start = now - historyMilliseconds;
   return points.map((point, index) => ({
-    x:
-      points.length === 1
-        ? bounds.right
-        : bounds.left + ((point.at - first) / span) * (bounds.right - bounds.left),
+    x: bounds.left + Math.max(0, Math.min(1, (point.at - start) / historyMilliseconds)) * (bounds.right - bounds.left),
     y: yFor(point.value),
     at: point.at,
     value: point.value,
@@ -48,20 +44,23 @@ function smoothPath(points: ReturnType<typeof chartCoordinates>) {
 }
 
 export function SignalChart({ points, current, unlockThreshold = -65, thresholdLabel = "解锁阈值", onCalibrate }: SignalChartProps) {
-  const coordinates = chartCoordinates(points);
+  const now = Date.now();
+  const coordinates = chartCoordinates(points, now);
   const line = smoothPath(coordinates);
   const area = line ? `${line} L ${bounds.right} ${bounds.bottom} L ${bounds.left} ${bounds.bottom} Z` : "";
   const last = coordinates.at(-1);
-  const timeLabels = points.length
-    ? [points[0], points[Math.floor((points.length - 1) / 2)], points.at(-1) as SignalPoint]
-    : [];
+  const timeLabels = [now - historyMilliseconds, now - historyMilliseconds / 2, now];
+  const chartWidth = 900;
+  const chartHeight = 220;
+  const topPercent = (value: number) => `${(value / chartHeight) * 100}%`;
+  const leftPercent = (value: number) => `${(value / chartWidth) * 100}%`;
 
   return (
     <section className="panel signal-panel" aria-labelledby="signal-heading">
       <div className="panel-heading signal-heading-row">
         <div>
           <h2 id="signal-heading">距离趋势</h2>
-          <p>最近 10 分钟</p>
+          <p>滚动 10 分钟 · 每 2 秒采样</p>
         </div>
         {typeof current === "number" ? <span className="current-signal">{current} dBm</span> : null}
       </div>
@@ -78,13 +77,10 @@ export function SignalChart({ points, current, unlockThreshold = -65, thresholdL
             return (
               <g key={value}>
                 <line x1={bounds.left} y1={y} x2={bounds.right} y2={y} className="grid-line" />
-                <text x="0" y={y + 4} className="axis-label">{value} dBm</text>
               </g>
             );
           })}
           <line x1={bounds.left} y1={yFor(unlockThreshold)} x2={bounds.right} y2={yFor(unlockThreshold)} className="threshold-line" />
-          <text x={bounds.right + 14} y={yFor(unlockThreshold) - 3} className="threshold-label">{thresholdLabel}</text>
-          <text x={bounds.right + 14} y={yFor(unlockThreshold) + 15} className="threshold-value">{unlockThreshold} dBm</text>
           {area ? <path d={area} fill="url(#signalArea)" /> : null}
           {line ? <path d={line} className="signal-line" /> : null}
           {last ? (
@@ -93,18 +89,28 @@ export function SignalChart({ points, current, unlockThreshold = -65, thresholdL
               <circle cx={last.x} cy={last.y} r="4.5" className="signal-dot" />
             </>
           ) : null}
-          {timeLabels.map((point, index) => (
-            <text
-              className="time-label"
-              key={`${point.at}-${index}`}
-              x={index === 0 ? bounds.left : index === 1 ? (bounds.left + bounds.right) / 2 : bounds.right}
-              y="208"
-              textAnchor={index === 0 ? "start" : index === 1 ? "middle" : "end"}
-            >
-              {formatClock(point.at)}
-            </text>
-          ))}
         </svg>
+        <div className="chart-label-layer" aria-hidden="true">
+          {[-40, -50, -60, -70, -80].map((value) => (
+            <span className="chart-label axis-overlay" key={value} style={{ top: topPercent(yFor(value)) }}>{value} dBm</span>
+          ))}
+          <span
+            className="chart-label threshold-overlay"
+            style={{ left: leftPercent(bounds.right + 14), top: topPercent(yFor(unlockThreshold)) }}
+          >
+            <strong>{thresholdLabel}</strong>
+            <span>{unlockThreshold} dBm</span>
+          </span>
+          {timeLabels.map((value, index) => (
+            <span
+              className={`chart-label time-overlay time-${index === 0 ? "start" : index === 1 ? "middle" : "end"}`}
+              key={index}
+              style={{ left: leftPercent(index === 0 ? bounds.left : index === 1 ? (bounds.left + bounds.right) / 2 : bounds.right) }}
+            >
+              {formatClock(value)}
+            </span>
+          ))}
+        </div>
         {!points.length ? <div className="chart-empty">正在收集蓝牙信号样本…</div> : null}
       </div>
       <div className="distance-controls">

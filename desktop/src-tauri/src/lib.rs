@@ -40,6 +40,8 @@ struct RuntimeStatus {
     auto_lock: bool,
     #[serde(default)]
     high_sensitivity: bool,
+    #[serde(default)]
+    doppler_prediction: bool,
     paused_until: Option<String>,
 }
 
@@ -49,6 +51,8 @@ struct RuntimeDefaults {
     auto_lock: bool,
     #[serde(default)]
     high_sensitivity: bool,
+    #[serde(default)]
+    doppler_prediction: bool,
     paused_until: Option<String>,
 }
 
@@ -159,6 +163,42 @@ async fn set_high_sensitivity(enabled: bool) -> Result<(), String> {
     call_control_async("set_high_sensitivity", Some(json!({ "enabled": enabled })))
         .await
         .map(|_| ())
+}
+
+#[tauri::command]
+async fn set_doppler_prediction(enabled: bool) -> Result<(), String> {
+    call_control_async(
+        "set_doppler_prediction",
+        Some(json!({ "enabled": enabled })),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[tauri::command]
+async fn set_doppler_sensitivity(sensitivity: i32) -> Result<(), String> {
+    if !(1..=100).contains(&sensitivity) {
+        return Err("多普勒预测灵敏度必须在 1 至 100 之间".to_owned());
+    }
+    call_control_async(
+        "set_doppler_sensitivity",
+        Some(json!({ "sensitivity": sensitivity })),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[tauri::command]
+async fn set_high_sensitivity_threshold(rssi: i32) -> Result<(), String> {
+    if !(-90..=-20).contains(&rssi) {
+        return Err("高灵敏触发阈值必须在 -90 至 -20 dBm 之间".to_owned());
+    }
+    call_control_async(
+        "set_high_sensitivity_threshold",
+        Some(json!({ "rssi": rssi })),
+    )
+    .await
+    .map(|_| ())
 }
 
 #[tauri::command]
@@ -388,7 +428,7 @@ fn start_runtime_monitor() {
         .name("proximity-runtime-monitor".to_owned())
         .spawn(move || {
             let mut last_auto_lock = defaults.auto_lock;
-            let mut last_high_sensitivity = defaults.high_sensitivity;
+            let mut last_fast_mode = defaults.high_sensitivity || defaults.doppler_prediction;
             let mut last_paused = pause_is_active(defaults.paused_until.as_deref());
             let mut unavailable_since: Option<Instant> = None;
             let mut fail_safe_locked = false;
@@ -401,7 +441,7 @@ fn start_runtime_monitor() {
                         fail_safe_locked = false;
                         if let Ok(status) = serde_json::from_value::<RuntimeStatus>(payload) {
                             last_auto_lock = status.auto_lock;
-                            last_high_sensitivity = status.high_sensitivity;
+                            last_fast_mode = status.high_sensitivity || status.doppler_prediction;
                             last_paused = pause_is_active(status.paused_until.as_deref());
                             if !status.session_active {
                                 let _ = call_control(
@@ -418,14 +458,14 @@ fn start_runtime_monitor() {
                         if !fail_safe_locked
                             && last_auto_lock
                             && !last_paused
-                            && started.elapsed() >= fail_safe_lock_delay(last_high_sensitivity)
+                            && started.elapsed() >= fail_safe_lock_delay(last_fast_mode)
                         {
                             let _ = lock_workstation_impl();
                             fail_safe_locked = true;
                         }
                     }
                 }
-                std::thread::sleep(monitor_poll_interval(last_high_sensitivity));
+                std::thread::sleep(monitor_poll_interval(last_fast_mode));
             }
         });
 }
@@ -526,6 +566,9 @@ pub fn run() {
             set_mode,
             set_auto_lock,
             set_high_sensitivity,
+            set_doppler_prediction,
+            set_doppler_sensitivity,
+            set_high_sensitivity_threshold,
             set_immediate_unlock,
             set_failure_cooldown,
             set_thresholds,

@@ -12,7 +12,7 @@ import (
 	"github.com/singu/proximity-unlock/internal/protocol"
 )
 
-const CurrentVersion = 3
+const CurrentVersion = 4
 
 type Thresholds struct {
 	UnlockRSSI          int `json:"unlock_rssi"`
@@ -25,30 +25,33 @@ type Thresholds struct {
 }
 
 type Config struct {
-	Version          int        `json:"version"`
-	TargetSID        string     `json:"target_sid"`
-	CanonicalUser    string     `json:"canonical_user"`
-	PCID             string     `json:"pc_id"`
-	PhoneID          string     `json:"phone_id,omitempty"`
-	PhoneStrictKey   string     `json:"phone_strict_public_key,omitempty"`
-	PhoneRelaxedKey  string     `json:"phone_relaxed_public_key,omitempty"`
-	PresenceSecretID string     `json:"presence_secret_id,omitempty"`
-	Mode             string     `json:"mode"`
-	AutoLock         bool       `json:"auto_lock"`
-	HighSensitivity  bool       `json:"high_sensitivity"`
-	ImmediateUnlock  bool       `json:"immediate_unlock"`
-	FailureCooldown  bool       `json:"failure_cooldown_enabled"`
-	PausedUntil      *time.Time `json:"paused_until,omitempty"`
-	CredentialValid  bool       `json:"credential_valid"`
-	Thresholds       Thresholds `json:"thresholds"`
+	Version            int        `json:"version"`
+	TargetSID          string     `json:"target_sid"`
+	CanonicalUser      string     `json:"canonical_user"`
+	PCID               string     `json:"pc_id"`
+	PhoneID            string     `json:"phone_id,omitempty"`
+	PhoneStrictKey     string     `json:"phone_strict_public_key,omitempty"`
+	PhoneRelaxedKey    string     `json:"phone_relaxed_public_key,omitempty"`
+	PresenceSecretID   string     `json:"presence_secret_id,omitempty"`
+	Mode               string     `json:"mode"`
+	AutoLock           bool       `json:"auto_lock"`
+	HighSensitivity    bool       `json:"high_sensitivity"`
+	DopplerPrediction  bool       `json:"doppler_prediction"`
+	DopplerSensitivity int        `json:"doppler_sensitivity"`
+	ImmediateUnlock    bool       `json:"immediate_unlock"`
+	FailureCooldown    bool       `json:"failure_cooldown_enabled"`
+	PausedUntil        *time.Time `json:"paused_until,omitempty"`
+	CredentialValid    bool       `json:"credential_valid"`
+	Thresholds         Thresholds `json:"thresholds"`
 }
 
 func Default() Config {
 	return Config{
-		Version:         CurrentVersion,
-		Mode:            protocol.ModeStrict.String(),
-		AutoLock:        true,
-		FailureCooldown: true,
+		Version:            CurrentVersion,
+		Mode:               protocol.ModeStrict.String(),
+		AutoLock:           true,
+		FailureCooldown:    true,
+		DopplerSensitivity: 60,
 		Thresholds: Thresholds{
 			UnlockRSSI:          -65,
 			LockRSSI:            -80,
@@ -75,6 +78,9 @@ func (c Config) Validate() error {
 	}
 	if c.Thresholds.HighSensitivityRSSI < -90 || c.Thresholds.HighSensitivityRSSI > -20 {
 		return errors.New("invalid high-sensitivity RSSI threshold")
+	}
+	if c.DopplerSensitivity < 1 || c.DopplerSensitivity > 100 {
+		return errors.New("invalid doppler sensitivity")
 	}
 	if c.Thresholds.UnlockWindowMS < 1000 || c.Thresholds.LockWindowMS < 5000 || c.Thresholds.ProofTimeoutMS < 5000 || c.Thresholds.ManualHoldAwayMS < 5000 {
 		return errors.New("unsafe timing threshold")
@@ -130,6 +136,8 @@ func Load(path string) (Config, error) {
 		result = migrateV1(result, raw)
 	} else if result.Version == 2 {
 		result = migrateV2(result)
+	} else if result.Version == 3 {
+		result = migrateV3(result)
 	}
 	if err := result.Validate(); err != nil {
 		return Config{}, err
@@ -156,6 +164,7 @@ func migrateV0(value Config, raw map[string]json.RawMessage) Config {
 		value.Thresholds.LockRSSI = defaults.Thresholds.LockRSSI
 	}
 	defaultHighSensitivityRSSI(&value)
+	defaultDopplerSensitivity(&value)
 	if value.Thresholds.UnlockWindowMS == 0 {
 		value.Thresholds.UnlockWindowMS = defaults.Thresholds.UnlockWindowMS
 	}
@@ -177,6 +186,7 @@ func migrateV1(value Config, raw map[string]json.RawMessage) Config {
 		value.FailureCooldown = Default().FailureCooldown
 	}
 	defaultHighSensitivityRSSI(&value)
+	defaultDopplerSensitivity(&value)
 	return value
 }
 
@@ -194,6 +204,13 @@ func migrateV2(value Config) Config {
 			defaultHighSensitivityRSSI(&value)
 		}
 	}
+	defaultDopplerSensitivity(&value)
+	return value
+}
+
+func migrateV3(value Config) Config {
+	value.Version = CurrentVersion
+	defaultDopplerSensitivity(&value)
 	return value
 }
 
@@ -207,6 +224,12 @@ func defaultHighSensitivityRSSI(value *Config) {
 		value.Thresholds.HighSensitivityRSSI = value.Thresholds.UnlockRSSI
 	} else {
 		value.Thresholds.HighSensitivityRSSI = Default().Thresholds.HighSensitivityRSSI
+	}
+}
+
+func defaultDopplerSensitivity(value *Config) {
+	if value.DopplerSensitivity == 0 {
+		value.DopplerSensitivity = Default().DopplerSensitivity
 	}
 }
 

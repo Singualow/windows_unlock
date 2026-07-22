@@ -51,6 +51,21 @@ func TestMigrateV2PreservesPreviousHighSensitivityLockBoundary(t *testing.T) {
 	}
 }
 
+func TestMigrateV3AddsDopplerDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"version":3,"mode":"strict","auto_lock":true,"failure_cooldown_enabled":true,"thresholds":{"unlock_rssi":-65,"lock_rssi":-80,"high_sensitivity_rssi":-55,"unlock_window_ms":3000,"lock_window_ms":20000,"proof_timeout_ms":20000,"manual_hold_away_ms":10000}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != CurrentVersion || got.DopplerPrediction || got.DopplerSensitivity != Default().DopplerSensitivity {
+		t.Fatalf("v3 doppler defaults were not migrated: %+v", got)
+	}
+}
+
 func TestMigrateV0PreservesDisabledAutoLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"auto_lock":false}`), 0o600); err != nil {
@@ -74,6 +89,8 @@ func TestSaveAtomicallyReplacesExistingConfig(t *testing.T) {
 	second := first
 	second.AutoLock = false
 	second.HighSensitivity = true
+	second.DopplerPrediction = true
+	second.DopplerSensitivity = 82
 	second.Thresholds.HighSensitivityRSSI = -52
 	second.ImmediateUnlock = true
 	second.FailureCooldown = false
@@ -92,6 +109,9 @@ func TestSaveAtomicallyReplacesExistingConfig(t *testing.T) {
 	}
 	if got.Thresholds.HighSensitivityRSSI != -52 {
 		t.Fatal("high-sensitivity threshold was not persisted")
+	}
+	if !got.DopplerPrediction || got.DopplerSensitivity != 82 {
+		t.Fatal("doppler preference was not persisted")
 	}
 	if !got.ImmediateUnlock {
 		t.Fatal("immediate-unlock preference was not persisted")
@@ -115,5 +135,13 @@ func TestRejectsInvalidHighSensitivityThreshold(t *testing.T) {
 	cfg.Thresholds.HighSensitivityRSSI = -95
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("out-of-range high-sensitivity threshold was accepted")
+	}
+}
+
+func TestRejectsInvalidDopplerSensitivity(t *testing.T) {
+	cfg := Default()
+	cfg.DopplerSensitivity = 101
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("out-of-range doppler sensitivity was accepted")
 	}
 }

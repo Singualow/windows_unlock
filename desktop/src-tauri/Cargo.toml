@@ -1,6 +1,6 @@
 [package]
 name = "proximity-unlock-desktop"
-version = "0.2.3"
+version = "0.2.5"
 description = "蓝牙解锁 Windows 桌面控制中心"
 authors = ["Singu"]
 edition = "2024"

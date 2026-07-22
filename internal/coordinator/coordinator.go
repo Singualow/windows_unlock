@@ -38,28 +38,45 @@ type Coordinator struct {
 	authorizer *authorize.Manager
 	replay     *protocol.ReplayGuard
 
-	activeSession         uint32
-	sessionActive         bool
-	locked                bool
-	challengeBusy         bool
-	lastChallenge         time.Time
-	pairing               *pendingPairing
-	sessionValid          func(uint32) bool
-	lastCPEvent           string
-	lastCPEventAt         time.Time
-	lastAuthFailureCode   string
-	lastAuthFailureReason string
-	lastAuthFailureAt     time.Time
-	authFailureActive     bool
-	authLogger            func(AuthenticationLogEntry)
-	lastAuthLogCode       string
-	lastAuthLogAt         time.Time
+	activeSession             uint32
+	sessionActive             bool
+	locked                    bool
+	challengeBusy             bool
+	lastChallenge             time.Time
+	pairing                   *pendingPairing
+	sessionValid              func(uint32) bool
+	lastCPEvent               string
+	lastCPEventAt             time.Time
+	lastAuthFailureCode       string
+	lastAuthFailureReason     string
+	lastAuthFailureAt         time.Time
+	authLogger                func(AuthenticationLogEntry)
+	lastAuthOutcome           string
+	predictionActive          bool
+	predictionUnlockPending   bool
+	predictionUnlockPendingAt time.Time
+	predictionGuardActive     bool
+	recentEvents              []RecentEvent
+	nextEventID               uint64
 }
 
 type AuthenticationLogEntry struct {
 	Warning bool
 	Code    string
 	Message string
+}
+
+const maxRecentEvents = 100
+
+type RecentEvent struct {
+	ID      uint64    `json:"id"`
+	At      time.Time `json:"at"`
+	Kind    string    `json:"kind"`
+	Code    string    `json:"code"`
+	Message string    `json:"message"`
+	Detail  string    `json:"detail,omitempty"`
+	Result  string    `json:"result"`
+	Warning bool      `json:"warning"`
 }
 
 type authenticationError struct {
@@ -108,6 +125,11 @@ type Status struct {
 	Mode                  string             `json:"mode"`
 	AutoLock              bool               `json:"auto_lock"`
 	HighSensitivity       bool               `json:"high_sensitivity"`
+	DopplerPrediction     bool               `json:"doppler_prediction"`
+	DopplerSensitivity    int                `json:"doppler_sensitivity"`
+	DopplerTriggered      bool               `json:"doppler_triggered"`
+	PredictedRSSI         int                `json:"predicted_rssi,omitempty"`
+	RSSISlopeDBPerSec     float64            `json:"rssi_slope_db_per_sec,omitempty"`
 	ImmediateUnlock       bool               `json:"immediate_unlock"`
 	FailureCooldown       bool               `json:"failure_cooldown_enabled"`
 	PausedUntil           time.Time          `json:"paused_until,omitempty"`
@@ -128,11 +150,12 @@ type Status struct {
 	UnlockRSSI            int                `json:"unlock_rssi"`
 	LockRSSI              int                `json:"lock_rssi"`
 	HighSensitivityRSSI   int                `json:"high_sensitivity_rssi"`
+	RecentEvents          []RecentEvent      `json:"recent_events"`
 }
 
 func New(configPath string, cfg config.Config, secrets secret.Store, signer Signer, transport ble.Transport, authorizer *authorize.Manager) *Coordinator {
 	settings := settingsFor(cfg)
-	return &Coordinator{
+	result := &Coordinator{
 		configPath: configPath,
 		config:     cfg,
 		secrets:    secrets,
@@ -142,6 +165,32 @@ func New(configPath string, cfg config.Config, secrets secret.Store, signer Sign
 		authorizer: authorizer,
 		replay:     protocol.NewReplayGuard(time.Minute),
 	}
+	result.appendEventLocked(time.Now(), "service", "service_started", "蓝牙解锁服务已启动", "BLE 扫描、会话监视和认证状态机已就绪", "运行中", false)
+	return result
+}
+
+func (c *Coordinator) appendEventLocked(now time.Time, kind, code, message, detail, result string, warning bool) bool {
+	if count := len(c.recentEvents); count > 0 {
+		last := c.recentEvents[count-1]
+		if last.Code == code && last.Message == message && last.Detail == detail && last.Warning == warning {
+			return false
+		}
+	}
+	c.nextEventID++
+	c.recentEvents = append(c.recentEvents, RecentEvent{
+		ID: c.nextEventID, At: now, Kind: kind, Code: code, Message: message,
+		Detail: detail, Result: result, Warning: warning,
+	})
+	if len(c.recentEvents) > maxRecentEvents {
+		c.recentEvents = append([]RecentEvent(nil), c.recentEvents[len(c.recentEvents)-maxRecentEvents:]...)
+	}
+	return true
+}
+
+func (c *Coordinator) appendEvent(now time.Time, kind, code, message, detail, result string, warning bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.appendEventLocked(now, kind, code, message, detail, result, warning)
 }
 
 func settingsFor(cfg config.Config) proximity.Settings {
@@ -154,21 +203,26 @@ func settingsFor(cfg config.Config) proximity.Settings {
 	settings.ManualHoldAway = time.Duration(cfg.Thresholds.ManualHoldAwayMS) * time.Millisecond
 	settings.ImmediateUnlock = cfg.ImmediateUnlock
 	settings.FailureCooldownOn = cfg.FailureCooldown
+	settings.DopplerPrediction = cfg.DopplerPrediction
+	settings.DopplerSensitivity = cfg.DopplerSensitivity
 	if cfg.HighSensitivity {
 		settings.HighSensitivity = true
 		settings.UnlockRSSI = cfg.Thresholds.HighSensitivityRSSI
 		settings.LockRSSI = cfg.Thresholds.HighSensitivityRSSI - 8
 		settings.UnlockWindow = 1500 * time.Millisecond
-		settings.LockWindow = 2 * time.Second
-		settings.ProofTimeout = 4 * time.Second
+		settings.LockWindow = 10 * time.Second
+		settings.ProofTimeout = 10 * time.Second
 		settings.ManualHoldAway = 2 * time.Second
 		settings.RequiredNearSamples = 1
+	}
+	if cfg.DopplerPrediction {
+		settings.ProofTimeout = 10 * time.Second
 	}
 	return settings
 }
 
 func challengeIntervalFor(cfg config.Config, locked bool) time.Duration {
-	if cfg.HighSensitivity {
+	if cfg.HighSensitivity || cfg.DopplerPrediction {
 		if locked {
 			// The first new near advertisement should start authentication almost
 			// immediately while retaining a small retry limit after failures.
@@ -180,7 +234,7 @@ func challengeIntervalFor(cfg config.Config, locked bool) time.Duration {
 }
 
 func authenticationTimeoutFor(cfg config.Config) time.Duration {
-	if cfg.HighSensitivity {
+	if cfg.HighSensitivity || cfg.DopplerPrediction {
 		// Do not let a stale GATT connection block a newly returned phone for
 		// the normal five-second exchange timeout.
 		return 1500 * time.Millisecond
@@ -195,19 +249,39 @@ func (c *Coordinator) Start(ctx context.Context) error {
 func (c *Coordinator) Close() error { return c.transport.Close() }
 
 func (c *Coordinator) MarkSessionActive(sessionID uint32) {
+	now := time.Now()
 	c.mu.Lock()
+	changed := !c.sessionActive || c.locked || c.activeSession != sessionID
+	wasLocked := c.locked
 	c.activeSession = sessionID
 	c.sessionActive = true
 	c.locked = false
+	if changed {
+		c.appendEventLocked(now, "session", "session_active", "本地控制台已进入桌面", fmt.Sprintf("会话 %d 已激活，锁定计时已重置", sessionID), "活动", false)
+		pendingAge := now.Sub(c.predictionUnlockPendingAt)
+		c.predictionGuardActive = wasLocked && c.predictionUnlockPending && pendingAge >= 0 && pendingAge <= 6*time.Second
+		c.predictionUnlockPending = false
+		c.predictionUnlockPendingAt = time.Time{}
+		if c.predictionGuardActive {
+			c.appendEventLocked(now, "authentication", "doppler_guard_started", "趋势预测解锁进入安全复核", "需要在 10 秒内再次完成手机签名认证，否则电脑将重新锁定", "复核中", false)
+		}
+	}
 	c.mu.Unlock()
-	c.state.OnUnlock(time.Now())
+	c.state.OnUnlock(now)
 	c.authorizer.Cancel()
 }
 
 func (c *Coordinator) MarkLocked(sessionID uint32, now time.Time) {
 	c.mu.Lock()
 	if c.sessionActive && sessionID == c.activeSession {
+		changed := !c.locked
 		c.locked = true
+		c.predictionUnlockPending = false
+		c.predictionUnlockPendingAt = time.Time{}
+		c.predictionGuardActive = false
+		if changed {
+			c.appendEventLocked(now, "session", "session_locked", "Windows 已进入锁屏", "等待手机返回并完成新鲜挑战", "已锁定", false)
+		}
 		c.mu.Unlock()
 		c.state.OnLock(now)
 		return
@@ -218,11 +292,16 @@ func (c *Coordinator) MarkLocked(sessionID uint32, now time.Time) {
 func (c *Coordinator) MarkUnlocked(sessionID uint32) { c.MarkSessionActive(sessionID) }
 
 func (c *Coordinator) MarkLoggedOff(sessionID uint32) {
+	now := time.Now()
 	c.mu.Lock()
 	if c.activeSession == sessionID {
 		c.sessionActive = false
 		c.locked = false
 		c.activeSession = 0
+		c.predictionUnlockPending = false
+		c.predictionUnlockPendingAt = time.Time{}
+		c.predictionGuardActive = false
+		c.appendEventLocked(now, "session", "session_logged_off", "本地控制台已注销", "自动解锁授权已全部清除", "已注销", false)
 	}
 	c.mu.Unlock()
 	c.authorizer.Cancel()
@@ -234,6 +313,7 @@ func (c *Coordinator) MarkResume(now time.Time) {
 	c.mu.Unlock()
 	if locked {
 		c.state.OnResume(now)
+		c.appendEvent(now, "session", "system_resumed", "系统已从睡眠恢复", "已打开一次新的近距离挑战窗口", "已恢复", false)
 	}
 }
 
@@ -241,11 +321,13 @@ func (c *Coordinator) Status(now time.Time) Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	rssi, hasRSSI := c.state.MedianRSSI(now)
+	prediction := c.state.Prediction(now)
 	pausedUntil := time.Time{}
 	if c.config.PausedUntil != nil {
 		pausedUntil = *c.config.PausedUntil
 	}
-	shouldLock := c.config.AutoLock && c.sessionActive && !c.locked && !pausedUntil.After(now) && c.state.ShouldAutoLock(now)
+	lockPolicyActive := c.config.AutoLock || c.predictionGuardActive
+	shouldLock := lockPolicyActive && c.sessionActive && !c.locked && !pausedUntil.After(now) && c.state.ShouldAutoLock(now)
 	return Status{
 		Configured:            c.config.TargetSID != "" && c.config.PCID != "",
 		Paired:                c.config.PhoneID != "",
@@ -253,6 +335,11 @@ func (c *Coordinator) Status(now time.Time) Status {
 		Mode:                  c.config.Mode,
 		AutoLock:              c.config.AutoLock,
 		HighSensitivity:       c.config.HighSensitivity,
+		DopplerPrediction:     c.config.DopplerPrediction,
+		DopplerSensitivity:    c.config.DopplerSensitivity,
+		DopplerTriggered:      prediction.Ready,
+		PredictedRSSI:         prediction.ProjectedRSSI,
+		RSSISlopeDBPerSec:     prediction.SlopeDBPerSec,
 		ImmediateUnlock:       c.config.ImmediateUnlock,
 		FailureCooldown:       c.config.FailureCooldown,
 		PausedUntil:           pausedUntil,
@@ -273,6 +360,7 @@ func (c *Coordinator) Status(now time.Time) Status {
 		UnlockRSSI:            c.config.Thresholds.UnlockRSSI,
 		LockRSSI:              c.config.Thresholds.LockRSSI,
 		HighSensitivityRSSI:   c.config.Thresholds.HighSensitivityRSSI,
+		RecentEvents:          append([]RecentEvent(nil), c.recentEvents...),
 	}
 }
 
@@ -309,6 +397,7 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		if err := c.updateConfig(func(cfg *config.Config) { cfg.Mode = payload.Mode }); err != nil {
 			return ipc.ControlResponse{Error: err.Error()}
 		}
+		c.appendEvent(now, "configuration", "mode_changed", "解锁模式已更新", "当前模式："+payload.Mode, "已保存", false)
 		return ipc.ControlResponse{OK: true}
 	case "set_auto_lock":
 		var payload struct {
@@ -320,6 +409,7 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		if err := c.updateConfig(func(cfg *config.Config) { cfg.AutoLock = *payload.Enabled }); err != nil {
 			return ipc.ControlResponse{Error: err.Error()}
 		}
+		c.appendEvent(now, "configuration", "auto_lock_changed", "自动锁定设置已更新", "自动锁定："+enabledText(*payload.Enabled), "已保存", false)
 		return ipc.ControlResponse{OK: true}
 	case "set_high_sensitivity":
 		var payload struct {
@@ -336,6 +426,69 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		c.mu.Unlock()
 		c.state.UpdateSettings(settings)
 		c.state.BeginProofGrace(now)
+		c.appendEvent(now, "configuration", "high_sensitivity_changed", "高灵敏模式设置已更新", "高灵敏模式："+enabledText(*payload.Enabled), "已保存", false)
+		return ipc.ControlResponse{OK: true}
+	case "set_doppler_prediction":
+		var payload struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if json.Unmarshal(request.Payload, &payload) != nil || payload.Enabled == nil {
+			return ipc.ControlResponse{Error: "invalid doppler-prediction request"}
+		}
+		if err := c.updateConfig(func(cfg *config.Config) { cfg.DopplerPrediction = *payload.Enabled }); err != nil {
+			return ipc.ControlResponse{Error: err.Error()}
+		}
+		c.mu.Lock()
+		settings := settingsFor(c.config)
+		c.predictionActive = false
+		c.predictionUnlockPending = false
+		c.predictionUnlockPendingAt = time.Time{}
+		c.predictionGuardActive = false
+		c.mu.Unlock()
+		c.state.UpdateSettings(settings)
+		c.state.BeginProofGrace(now)
+		c.appendEvent(now, "configuration", "doppler_prediction_changed", "多普勒预测设置已更新", "多普勒预测："+enabledText(*payload.Enabled)+"；预测只会提前发起认证，仍需有效手机签名", "已保存", false)
+		return ipc.ControlResponse{OK: true}
+	case "set_doppler_sensitivity":
+		var payload struct {
+			Sensitivity int `json:"sensitivity"`
+		}
+		if json.Unmarshal(request.Payload, &payload) != nil {
+			return ipc.ControlResponse{Error: "invalid doppler-sensitivity request"}
+		}
+		if err := c.updateConfig(func(cfg *config.Config) { cfg.DopplerSensitivity = payload.Sensitivity }); err != nil {
+			return ipc.ControlResponse{Error: err.Error()}
+		}
+		c.mu.Lock()
+		settings := settingsFor(c.config)
+		dopplerEnabled := c.config.DopplerPrediction
+		c.predictionActive = false
+		c.mu.Unlock()
+		c.state.UpdateSettings(settings)
+		if dopplerEnabled {
+			c.state.BeginProofGrace(now)
+		}
+		c.appendEvent(now, "configuration", "doppler_sensitivity_changed", "多普勒预测灵敏度已更新", fmt.Sprintf("预测灵敏度：%d；数值越高越早发起认证", payload.Sensitivity), "已保存", false)
+		return ipc.ControlResponse{OK: true}
+	case "set_high_sensitivity_threshold":
+		var payload struct {
+			RSSI int `json:"rssi"`
+		}
+		if json.Unmarshal(request.Payload, &payload) != nil {
+			return ipc.ControlResponse{Error: "invalid high-sensitivity threshold request"}
+		}
+		if err := c.updateConfig(func(cfg *config.Config) { cfg.Thresholds.HighSensitivityRSSI = payload.RSSI }); err != nil {
+			return ipc.ControlResponse{Error: err.Error()}
+		}
+		c.mu.Lock()
+		settings := settingsFor(c.config)
+		highSensitivity := c.config.HighSensitivity
+		c.mu.Unlock()
+		c.state.UpdateSettings(settings)
+		if highSensitivity {
+			c.state.BeginProofGrace(now)
+		}
+		c.appendEvent(now, "configuration", "high_sensitivity_threshold_changed", "高灵敏触发阈值已更新", fmt.Sprintf("触发阈值 %d dBm；派生锁定线 %d dBm", payload.RSSI, payload.RSSI-8), "已保存", false)
 		return ipc.ControlResponse{OK: true}
 	case "set_immediate_unlock":
 		var payload struct {
@@ -348,6 +501,7 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 			return ipc.ControlResponse{Error: err.Error()}
 		}
 		c.state.SetImmediateUnlock(*payload.Enabled)
+		c.appendEvent(now, "configuration", "immediate_unlock_changed", "锁屏后立即解锁设置已更新", "立即解锁："+enabledText(*payload.Enabled), "已保存", false)
 		return ipc.ControlResponse{OK: true}
 	case "set_failure_cooldown":
 		var payload struct {
@@ -363,6 +517,7 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		settings := settingsFor(c.config)
 		c.mu.Unlock()
 		c.state.UpdateSettings(settings)
+		c.appendEvent(now, "configuration", "failure_cooldown_changed", "认证失败冷却设置已更新", "安全冷却："+enabledText(*payload.Enabled), "已保存", false)
 		return ipc.ControlResponse{OK: true}
 	case "set_thresholds":
 		var payload struct {
@@ -390,6 +545,11 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		if highSensitivity {
 			c.state.BeginProofGrace(now)
 		}
+		detail := fmt.Sprintf("普通解锁 %d dBm；普通锁定 %d dBm", payload.UnlockRSSI, payload.LockRSSI)
+		if payload.HighSensitivityRSSI != nil {
+			detail += fmt.Sprintf("；高灵敏触发 %d dBm；派生锁定 %d dBm", *payload.HighSensitivityRSSI, *payload.HighSensitivityRSSI-8)
+		}
+		c.appendEvent(now, "configuration", "thresholds_changed", "距离阈值已更新", detail, "已保存", false)
 		return ipc.ControlResponse{OK: true}
 	case "pause":
 		var payload struct {
@@ -411,17 +571,24 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		}); err != nil {
 			return ipc.ControlResponse{Error: err.Error()}
 		}
+		if until.IsZero() {
+			c.appendEvent(now, "configuration", "service_resumed", "蓝牙解锁已恢复", "暂停状态已清除", "运行中", false)
+		} else {
+			c.appendEvent(now, "configuration", "service_paused", "蓝牙解锁已暂停", fmt.Sprintf("暂停 %d 秒，期间不会自动锁定或解锁", payload.Seconds), "已暂停", false)
+		}
 		return ipc.ControlResponse{OK: true, Payload: map[string]any{"paused_until": until}}
 	case "pair_start":
 		uri, err := c.startPairing(now)
 		if err != nil {
 			return ipc.ControlResponse{Error: err.Error()}
 		}
+		c.appendEvent(now, "pairing", "pairing_started", "已生成新的配对二维码", "二维码两分钟内有效，旧的一次性配对密钥已作废", "等待扫码", false)
 		return ipc.ControlResponse{OK: true, Payload: map[string]any{"uri": uri, "expires_at": now.Add(2 * time.Minute)}}
 	case "revoke":
 		if err := c.revoke(); err != nil {
 			return ipc.ControlResponse{Error: err.Error()}
 		}
+		c.appendEvent(now, "pairing", "pairing_revoked", "手机配对已撤销", "配对密钥、设备公钥和现有解锁授权已清除", "已撤销", false)
 		return ipc.ControlResponse{OK: true}
 	case "reload":
 		next, err := config.Load(c.configPath)
@@ -430,14 +597,16 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		}
 		c.mu.Lock()
 		previousHighSensitivity := c.config.HighSensitivity
+		previousDopplerPrediction := c.config.DopplerPrediction
 		if next.TargetSID != c.config.TargetSID || next.PCID != c.config.PCID {
 			c.mu.Unlock()
 			return ipc.ControlResponse{Error: "identity fields cannot be changed while the service is running"}
 		}
 		c.config = next
+		c.predictionActive = false
 		c.mu.Unlock()
 		c.state.UpdateSettings(settingsFor(next))
-		if previousHighSensitivity != next.HighSensitivity {
+		if previousHighSensitivity != next.HighSensitivity || previousDopplerPrediction != next.DopplerPrediction {
 			c.state.BeginProofGrace(now)
 		}
 		if next.CredentialValid {
@@ -454,9 +623,14 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 func (c *Coordinator) HandleAuth(_ context.Context, command string) ipc.AuthResponse {
 	now := time.Now()
 	if strings.HasPrefix(command, "DIAG ") {
+		event := strings.TrimSpace(strings.TrimPrefix(command, "DIAG "))
 		c.mu.Lock()
-		c.lastCPEvent = strings.TrimSpace(strings.TrimPrefix(command, "DIAG "))
+		changed := c.lastCPEvent != event
+		c.lastCPEvent = event
 		c.lastCPEventAt = now
+		if changed {
+			c.appendEventLocked(now, "credential", "credential_provider_"+strings.ToLower(event), "凭据提供程序状态已更新", "事件："+event, "已接收", false)
+		}
 		c.mu.Unlock()
 		return ipc.AuthResponse{Status: ipc.AuthUnavailable}
 	}
@@ -492,12 +666,15 @@ func (c *Coordinator) HandleAuth(_ context.Context, command string) ipc.AuthResp
 			return ipc.AuthResponse{Status: ipc.AuthError}
 		}
 		defer protocol.Zero(password)
+		c.appendEvent(now, "credential", "credential_consumed", "自动解锁凭据已安全提交", "仅向当前锁定会话提交一次，授权消费后立即失效", "已提交", false)
 		return ipc.AuthResponse{Status: ipc.AuthAvailable, Username: cfg.CanonicalUser, Password: string(password), TargetSID: cfg.TargetSID}
 	case "INVALID":
 		c.invalidateCredential()
+		c.appendEvent(now, "credential", "credential_invalid", "Windows 拒绝了自动解锁凭据", "已清除一次性授权并禁用自动解锁，请手动登录后更新密码", "失败", true)
 		return ipc.AuthResponse{Status: ipc.AuthInvalid}
 	case "SUCCESS":
 		c.authorizer.Cancel()
+		c.appendEvent(now, "credential", "unlock_success", "Windows 已接受自动解锁凭据", "一次性授权已消费并清除", "成功", false)
 		return ipc.AuthResponse{Status: ipc.AuthUnavailable}
 	default:
 		return ipc.AuthResponse{Status: ipc.AuthError}
@@ -550,7 +727,16 @@ func (c *Coordinator) handleCandidate(ctx context.Context, candidate ble.Candida
 	}
 	now := time.Now()
 	c.state.ObserveRSSI(candidate.RSSI, now)
+	prediction := c.state.Prediction(now)
 	c.mu.Lock()
+	if cfg.DopplerPrediction {
+		if prediction.Ready && !c.predictionActive {
+			c.appendEventLocked(now, "authentication", "doppler_prediction_triggered", "多普勒预测已提前发起认证", fmt.Sprintf("当前 %d dBm；预测 %d dBm；增强速度 %.1f dB/s；仍需手机签名", candidate.RSSI, prediction.ProjectedRSSI, prediction.SlopeDBPerSec), "预测命中", false)
+		}
+		c.predictionActive = prediction.Ready
+	} else {
+		c.predictionActive = false
+	}
 	paused := cfg.PausedUntil != nil && cfg.PausedUntil.After(now)
 	locked := c.locked
 	shouldChallenge := c.sessionActive && !paused && !c.challengeBusy && c.state.CanAuthenticate(now) && now.Sub(c.lastChallenge) >= challengeIntervalFor(cfg, locked) && (!locked || c.state.ShouldAttemptUnlock(now))
@@ -576,26 +762,47 @@ func (c *Coordinator) recordAuthenticationResult(err error) {
 	now := time.Now()
 	if err == nil {
 		c.mu.Lock()
-		wasFailing := c.authFailureActive
-		c.authFailureActive = false
+		wasFailing := strings.HasPrefix(c.lastAuthOutcome, "failure:")
+		shouldLog := c.lastAuthOutcome != "success"
+		c.lastAuthOutcome = "success"
 		logger := c.authLogger
+		if shouldLog {
+			code := "authentication_success"
+			message := "手机认证通过"
+			if wasFailing {
+				code = "authentication_recovered"
+				message = "手机认证已恢复"
+			}
+			c.appendEventLocked(now, "authentication", code, message, "电脑签名、手机签名、nonce、计数器和目标会话校验通过", "成功", false)
+		}
 		c.mu.Unlock()
-		if wasFailing && logger != nil {
-			logger(AuthenticationLogEntry{Code: "authentication_recovered", Message: "手机认证已恢复"})
+		if shouldLog && logger != nil {
+			code := "authentication_success"
+			message := "手机认证通过"
+			if wasFailing {
+				code = "authentication_recovered"
+				message = "手机认证已恢复"
+			}
+			logger(AuthenticationLogEntry{Code: code, Message: message})
 		}
 		return
 	}
 	failure := classifyAuthenticationError(err)
+	c.state.RecordAttemptFailure(now)
 	c.mu.Lock()
 	c.lastAuthFailureCode = failure.code
 	c.lastAuthFailureReason = failure.message
 	c.lastAuthFailureAt = now
 	logger := c.authLogger
-	shouldLog := c.lastAuthLogCode != failure.code || now.Sub(c.lastAuthLogAt) >= 30*time.Second
+	outcome := "failure:" + failure.code
+	shouldLog := c.lastAuthOutcome != outcome
+	c.lastAuthOutcome = outcome
 	if shouldLog {
-		c.lastAuthLogCode = failure.code
-		c.lastAuthLogAt = now
-		c.authFailureActive = true
+		detail := "错误代码：" + failure.code + "；将继续认证，并按普通模式超时策略决定是否锁定"
+		if c.config.HighSensitivity || c.config.DopplerPrediction {
+			detail = "错误代码：" + failure.code + "；将继续认证，连续失败满 10 秒后才允许自动锁定"
+		}
+		c.appendEventLocked(now, "authentication", failure.code, "认证失败："+failure.message, detail, "失败", true)
 	}
 	c.mu.Unlock()
 	if failure.security {
@@ -612,6 +819,7 @@ func (c *Coordinator) authenticate(parent context.Context, candidate ble.Candida
 	sessionID := c.activeSession
 	locked := c.locked
 	c.mu.Unlock()
+	predictionReady := cfg.DopplerPrediction && c.state.Prediction(time.Now()).Ready
 	mode, err := protocol.ParseMode(cfg.Mode)
 	if err != nil {
 		return authError("config_invalid", "解锁模式配置无效", false, err)
@@ -664,11 +872,28 @@ func (c *Coordinator) authenticate(parent context.Context, candidate ble.Candida
 	if err := c.replay.Accept(response.Nonce, response.Counter, time.Now()); err != nil {
 		return authError("replay_rejected", "手机响应计数器或 nonce 重放被拒绝", true, err)
 	}
-	c.state.RecordProof(time.Now())
+	proofAt := time.Now()
+	c.state.RecordProof(proofAt)
 	if locked {
-		if err := c.authorizer.Grant(sessionID, time.Now()); err != nil {
+		if err := c.authorizer.Grant(sessionID, proofAt); err != nil {
 			return authError("authorization_failed", "无法创建一次性解锁授权", false, err)
 		}
+		c.mu.Lock()
+		c.predictionUnlockPending = predictionReady
+		if predictionReady {
+			c.predictionUnlockPendingAt = proofAt
+		} else {
+			c.predictionUnlockPendingAt = time.Time{}
+		}
+		c.mu.Unlock()
+		c.appendEvent(proofAt, "authorization", "authorization_granted", "一次性解锁授权已就绪", fmt.Sprintf("目标会话：%d；授权将在短时间内过期且只能消费一次", sessionID), "待消费", false)
+	} else {
+		c.mu.Lock()
+		if c.predictionGuardActive {
+			c.predictionGuardActive = false
+			c.appendEventLocked(proofAt, "authentication", "doppler_guard_confirmed", "趋势预测解锁复核通过", "已在 10 秒安全窗口内再次完成手机签名认证", "已确认", false)
+		}
+		c.mu.Unlock()
 	}
 	return nil
 }
@@ -757,6 +982,7 @@ func (c *Coordinator) completePairing(ctx context.Context, candidate ble.Candida
 		c.pairing = nil
 	}
 	c.mu.Unlock()
+	c.appendEvent(time.Now(), "pairing", "pairing_completed", "手机安全配对已完成", "已保存两种模式的手机公钥和新的 presence key；未记录完整设备标识", "成功", false)
 }
 
 func (c *Coordinator) revoke() error {
@@ -802,4 +1028,11 @@ func decodeID(value string) ([protocol.DeviceIDSize]byte, error) {
 	}
 	copy(result[:], decoded)
 	return result, nil
+}
+
+func enabledText(enabled bool) string {
+	if enabled {
+		return "已开启"
+	}
+	return "已关闭"
 }

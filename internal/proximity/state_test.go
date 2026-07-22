@@ -174,18 +174,64 @@ func TestManualUnlockHasProofGracePeriod(t *testing.T) {
 	}
 }
 
-func TestHighSensitivityLocksAfterShortProofTimeout(t *testing.T) {
+func TestHighSensitivityLocksAfterTenSecondProofTimeout(t *testing.T) {
 	settings := DefaultSettings()
 	settings.HighSensitivity = true
-	settings.ProofTimeout = 4 * time.Second
+	settings.ProofTimeout = 10 * time.Second
 	s := NewState(settings)
 	now := time.Unix(1_800_000_000, 0)
 	s.RecordProof(now)
-	if s.ShouldAutoLock(now.Add(3 * time.Second)) {
+	if s.ShouldAutoLock(now.Add(9 * time.Second)) {
 		t.Fatal("high-sensitivity mode locked before its proof timeout")
 	}
-	if !s.ShouldAutoLock(now.Add(4*time.Second + time.Millisecond)) {
+	if !s.ShouldAutoLock(now.Add(10*time.Second + time.Millisecond)) {
 		t.Fatal("high-sensitivity mode did not lock after its proof timeout")
+	}
+}
+
+func TestHighSensitivityFailureGetsFullTenSecondRecoveryWindow(t *testing.T) {
+	settings := DefaultSettings()
+	settings.HighSensitivity = true
+	settings.ProofTimeout = 10 * time.Second
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	s.RecordProof(now)
+	failureAt := now.Add(30 * time.Second)
+	s.RecordAttemptFailure(failureAt)
+	if s.ShouldAutoLock(failureAt.Add(9 * time.Second)) {
+		t.Fatal("high-sensitivity mode locked before authentication had failed continuously for ten seconds")
+	}
+	if !s.ShouldAutoLock(failureAt.Add(10*time.Second + time.Millisecond)) {
+		t.Fatal("high-sensitivity mode did not lock after ten seconds of continuous authentication failure")
+	}
+}
+
+func TestHighSensitivitySuccessfulProofClearsFailureWindow(t *testing.T) {
+	settings := DefaultSettings()
+	settings.HighSensitivity = true
+	settings.ProofTimeout = 10 * time.Second
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	s.RecordAttemptFailure(now)
+	s.RecordProof(now.Add(7 * time.Second))
+	if s.ShouldAutoLock(now.Add(12 * time.Second)) {
+		t.Fatal("successful proof did not clear the authentication failure window")
+	}
+}
+
+func TestHighSensitivityLowSignalMustPersistForTenSeconds(t *testing.T) {
+	settings := DefaultSettings()
+	settings.HighSensitivity = true
+	settings.LockWindow = 10 * time.Second
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	s.RecordProof(now.Add(5 * time.Second))
+	s.ObserveRSSI(settings.LockRSSI-1, now)
+	if s.ShouldAutoLock(now.Add(9 * time.Second)) {
+		t.Fatal("high-sensitivity mode locked before low signal persisted for ten seconds")
+	}
+	if !s.ShouldAutoLock(now.Add(10*time.Second + time.Millisecond)) {
+		t.Fatal("high-sensitivity mode did not lock after low signal persisted for ten seconds")
 	}
 }
 
@@ -193,7 +239,7 @@ func TestHighSensitivityUsesLatestNearSample(t *testing.T) {
 	settings := DefaultSettings()
 	settings.HighSensitivity = true
 	settings.UnlockWindow = 1500 * time.Millisecond
-	settings.ProofTimeout = 4 * time.Second
+	settings.ProofTimeout = 10 * time.Second
 	settings.RequiredNearSamples = 1
 	s := NewState(settings)
 	now := time.Unix(1_800_000_000, 0)
@@ -213,10 +259,93 @@ func TestSensitivityTransitionStartsFreshProofGrace(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	s.OnUnlock(now)
 	settings.HighSensitivity = true
-	settings.ProofTimeout = 4 * time.Second
+	settings.ProofTimeout = 10 * time.Second
 	s.UpdateSettings(settings)
 	s.BeginProofGrace(now.Add(time.Minute))
 	if s.ShouldAutoLock(now.Add(time.Minute + 3*time.Second)) {
 		t.Fatal("sensitivity transition ignored its fresh proof grace")
+	}
+}
+
+func TestDopplerPredictionArmsEarlyChallengeForApproachingPhone(t *testing.T) {
+	settings := DefaultSettings()
+	settings.DopplerPrediction = true
+	settings.DopplerSensitivity = 60
+	settings.ImmediateUnlock = true
+	settings.UnlockRSSI = -60
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	s.OnLock(now)
+	s.ObserveRSSI(-72, now)
+	s.ObserveRSSI(-68, now.Add(time.Second))
+	s.ObserveRSSI(-64, now.Add(2*time.Second))
+	prediction := s.Prediction(now.Add(2 * time.Second))
+	if !prediction.Ready || prediction.ProjectedRSSI < settings.UnlockRSSI {
+		t.Fatalf("approach was not predicted: %+v", prediction)
+	}
+	if !s.ShouldAttemptUnlock(now.Add(2 * time.Second)) {
+		t.Fatal("prediction did not arm an early authentication challenge")
+	}
+}
+
+func TestDopplerPredictionRejectsStableOrRecedingSignal(t *testing.T) {
+	settings := DefaultSettings()
+	settings.DopplerPrediction = true
+	settings.DopplerSensitivity = 100
+	settings.ImmediateUnlock = true
+	settings.UnlockRSSI = -60
+	for name, values := range map[string][]int{
+		"stable":   {-68, -67, -68, -67},
+		"receding": {-64, -67, -70, -73},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := NewState(settings)
+			now := time.Unix(1_800_000_000, 0)
+			s.OnLock(now)
+			for index, value := range values {
+				s.ObserveRSSI(value, now.Add(time.Duration(index)*time.Second))
+			}
+			if prediction := s.Prediction(now.Add(3 * time.Second)); prediction.Ready {
+				t.Fatalf("%s signal triggered prediction: %+v", name, prediction)
+			}
+		})
+	}
+}
+
+func TestDopplerSensitivityControlsPredictionTrigger(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	readyAt := func(sensitivity int) bool {
+		settings := DefaultSettings()
+		settings.DopplerPrediction = true
+		settings.DopplerSensitivity = sensitivity
+		settings.UnlockRSSI = -65
+		s := NewState(settings)
+		s.ObserveRSSI(-69, now)
+		s.ObserveRSSI(-68, now.Add(time.Second))
+		s.ObserveRSSI(-67, now.Add(2*time.Second))
+		return s.Prediction(now.Add(2 * time.Second)).Ready
+	}
+	if readyAt(1) {
+		t.Fatal("minimum sensitivity predicted a weak trend")
+	}
+	if !readyAt(100) {
+		t.Fatal("maximum sensitivity did not predict a valid weak approach")
+	}
+}
+
+func TestDopplerModeRelocksAfterTenSecondsWithoutProof(t *testing.T) {
+	settings := DefaultSettings()
+	settings.DopplerPrediction = true
+	settings.ProofTimeout = 10 * time.Second
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	s.OnUnlock(now)
+	s.RecordProof(now)
+	s.RecordAttemptFailure(now.Add(20 * time.Second))
+	if s.ShouldAutoLock(now.Add(29 * time.Second)) {
+		t.Fatal("doppler mode relocked before the ten-second revalidation window")
+	}
+	if !s.ShouldAutoLock(now.Add(30*time.Second + time.Millisecond)) {
+		t.Fatal("doppler mode did not relock after ten seconds without a valid proof")
 	}
 }

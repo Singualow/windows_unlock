@@ -8,8 +8,11 @@ interface SettingsPageProps {
   onModeChange: (mode: UnlockMode) => void;
   onAutoLockChange: (enabled: boolean) => void;
   onHighSensitivityChange: (enabled: boolean) => void;
+  onDopplerPredictionChange: (enabled: boolean) => void;
   onImmediateUnlockChange: (enabled: boolean) => void;
   onFailureCooldownChange: (enabled: boolean) => void;
+  onHighSensitivityParameters: () => void;
+  onDopplerParameters: () => void;
   onPause: (seconds: number) => void;
   systemIntegration: SystemIntegration | null;
   onCredentialProvider: () => void;
@@ -29,28 +32,48 @@ export function SettingsPage(props: SettingsPageProps) {
           onModeChange={props.onModeChange}
           onAutoLockChange={props.onAutoLockChange}
           onHighSensitivityChange={props.onHighSensitivityChange}
+          onDopplerPredictionChange={props.onDopplerPredictionChange}
           onImmediateUnlockChange={props.onImmediateUnlockChange}
           onFailureCooldownChange={props.onFailureCooldownChange}
+          onHighSensitivityParameters={props.onHighSensitivityParameters}
+          onDopplerParameters={props.onDopplerParameters}
           onMore={() => undefined}
+          grouped
           showMore={false}
           showFailureCooldown
         />
-        <section className="panel service-control-panel">
-          <div className="section-icon green"><Icon name="pause" size={24} /></div>
-          <div className="service-control-copy">
-            <h2>临时暂停</h2>
-            <p>暂停期间不会自动解锁或锁定，系统登录方式不受影响。</p>
-          </div>
-          <span className={paused ? "pause-state is-paused" : "pause-state"}>{paused ? "已暂停" : "正常运行"}</span>
-          <div className="pause-actions">
-            <button className="secondary-button" type="button" disabled={Boolean(props.busy)} onClick={() => props.onPause(300)}>暂停 5 分钟</button>
-            <button className="outline-button" type="button" disabled={!paused || Boolean(props.busy)} onClick={() => props.onPause(0)}>立即恢复</button>
-          </div>
-        </section>
-        <section className="panel privacy-panel">
-          <Icon name="shield" size={25} />
-          <div><h2>隐私保护</h2><p>界面与日志不会显示密码、私钥、完整签名或可追踪手机标识。</p></div>
-        </section>
+        <div className="settings-side-stack">
+          <section className="panel compact-setting-card pause-card">
+            <div className="compact-card-heading">
+              <span className="section-icon green"><Icon name="pause" size={22} /></span>
+              <span><strong>临时暂停</strong><small>暂停自动解锁与锁定</small></span>
+              <span className={paused ? "pause-state is-paused" : "pause-state"}>{paused ? "已暂停" : "正常运行"}</span>
+            </div>
+            <p>系统 PIN、密码和 Windows Hello 不受影响。</p>
+            <div className="compact-card-actions">
+              <button className="secondary-button" type="button" disabled={Boolean(props.busy)} onClick={() => props.onPause(300)}>暂停 5 分钟</button>
+              <button className="outline-button" type="button" disabled={!paused || Boolean(props.busy)} onClick={() => props.onPause(0)}>立即恢复</button>
+            </div>
+          </section>
+          <section className="panel compact-setting-card runtime-card">
+            <div className="compact-card-heading">
+              <span className="section-icon blue"><Icon name="signal" size={22} /></span>
+              <span><strong>运行状态</strong><small>当前蓝牙与认证状态</small></span>
+            </div>
+            <dl className="runtime-facts">
+              <div><dt>服务</dt><dd>{props.status ? "运行中" : "连接中"}</dd></div>
+              <div><dt>手机信号</dt><dd>{props.status?.has_rssi ? `${props.status.median_rssi} dBm` : "未发现"}</dd></div>
+              <div><dt>认证</dt><dd>{props.status?.credential_valid ? "凭据有效" : "需要更新"}</dd></div>
+            </dl>
+          </section>
+          <section className="panel compact-setting-card privacy-card">
+            <div className="compact-card-heading">
+              <span className="section-icon violet"><Icon name="shield" size={22} /></span>
+              <span><strong>隐私保护</strong><small>敏感信息不进入界面和日志</small></span>
+            </div>
+            <p>不显示密码、私钥、完整签名或可追踪手机标识。</p>
+          </section>
+        </div>
         <section className="panel maintenance-panel">
           <div className="maintenance-heading">
             <div className="section-icon blue"><Icon name="settings" size={23} /></div>

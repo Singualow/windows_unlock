@@ -6,6 +6,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { DevicesPage } from "./components/DevicesPage";
 import { HeroStatus } from "./components/HeroStatus";
 import { LogsPage } from "./components/LogsPage";
+import { ParameterDialog, type ParameterDialogKind } from "./components/ParameterDialog";
 import { SecurityTimeline } from "./components/SecurityTimeline";
 import { SettingsPage } from "./components/SettingsPage";
 import { SignalChart } from "./components/SignalChart";
@@ -19,7 +20,10 @@ import {
   runSetupAction,
   setAutoLock,
   setFailureCooldown,
+  setDopplerPrediction,
+  setDopplerSensitivity,
   setHighSensitivity,
+  setHighSensitivityThreshold,
   setImmediateUnlock,
   setMode,
   setThresholds,
@@ -28,7 +32,7 @@ import {
 import { buildSecurityEvents, describeError } from "./lib/format";
 import type { AppSection, SystemIntegration, UnlockMode } from "./types";
 
-type Confirmation = "convenience" | "immediate" | "cooldown" | "sensitivity" | "revoke" | "uninstall" | null;
+type Confirmation = "convenience" | "immediate" | "cooldown" | "sensitivity" | "doppler" | "revoke" | "uninstall" | null;
 
 const confirmationCopy: Record<Exclude<Confirmation, null>, { title: string; description: string; label: string; tone: "danger" | "warning" }> = {
   convenience: {
@@ -51,8 +55,14 @@ const confirmationCopy: Record<Exclude<Confirmation, null>, { title: string; des
   },
   sensitivity: {
     title: "开启高灵敏模式？",
-    description: "开启后将使用独立的高灵敏触发阈值。锁屏时首个符合阈值的新鲜广播会在约 0.2 秒内发起认证，失去有效签名约 4 秒便锁定。蓝牙短暂波动可能造成误锁，也会增加手机耗电。",
+    description: "开启后将使用独立的高灵敏触发阈值。锁屏时首个符合阈值的新鲜广播会在约 0.2 秒内发起认证；认证失败后仍会持续检测，只有连续 10 秒都未恢复才锁定。响应更快，但也会增加手机耗电。",
     label: "开启高灵敏模式",
+    tone: "warning",
+  },
+  doppler: {
+    title: "开启信号趋势预测？",
+    description: "系统会根据 RSSI 增强趋势提前发起认证，但只有手机签名验证通过后才会提交解锁凭据。预测解锁后若连续 10 秒拿不到新的有效证明，电脑会重新锁定。",
+    label: "开启趋势预测",
     tone: "warning",
   },
   revoke: {
@@ -77,6 +87,7 @@ export default function App() {
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [pairingExpiresAt, setPairingExpiresAt] = useState<string | null>(null);
   const [calibrationOpen, setCalibrationOpen] = useState(false);
+  const [parameterDialog, setParameterDialog] = useState<ParameterDialogKind | null>(null);
   const [systemIntegration, setSystemIntegration] = useState<SystemIntegration | null>(null);
   const { status, error, loading, signalPoints, refresh } = useServiceStatus();
   const events = useMemo(() => buildSecurityEvents(status), [status]);
@@ -143,6 +154,14 @@ export default function App() {
     void runOperation("sensitivity", () => setHighSensitivity(false), "高灵敏模式已关闭");
   }
 
+  function handleDopplerPrediction(enabled: boolean) {
+    if (enabled) {
+      setConfirmation("doppler");
+      return;
+    }
+    void runOperation("doppler", () => setDopplerPrediction(false), "信号趋势预测已关闭");
+  }
+
   async function confirmSensitiveAction() {
     const action = confirmation;
     setConfirmation(null);
@@ -157,6 +176,9 @@ export default function App() {
     }
     if (action === "sensitivity") {
       await runOperation("sensitivity", () => setHighSensitivity(true), "高灵敏模式已开启");
+    }
+    if (action === "doppler") {
+      await runOperation("doppler", () => setDopplerPrediction(true), "信号趋势预测已开启");
     }
     if (action === "revoke") {
       await runOperation("revoke", revokePairing, "已撤销手机配对");
@@ -209,6 +231,7 @@ export default function App() {
     onModeChange: handleModeChange,
     onAutoLockChange: (enabled: boolean) => void runOperation("auto-lock", () => setAutoLock(enabled), enabled ? "自动锁定已开启" : "自动锁定已关闭"),
     onHighSensitivityChange: handleHighSensitivity,
+    onDopplerPredictionChange: handleDopplerPrediction,
     onImmediateUnlockChange: handleImmediateUnlock,
     onFailureCooldownChange: handleFailureCooldown,
   };
@@ -235,10 +258,9 @@ export default function App() {
               thresholdLabel={status?.high_sensitivity ? "高灵敏触发" : "解锁阈值"}
               onCalibrate={() => setCalibrationOpen(true)}
             />
-            <UnlockSettings {...settingsProps} onMore={() => setSection("settings")} />
+            <UnlockSettings {...settingsProps} compact onMore={() => setSection("settings")} />
           </div>
           <SecurityTimeline events={events} onOpenLogs={() => setSection("logs")} />
-          <footer className="privacy-footer"><span aria-hidden="true">▣</span> 不记录密码、私钥或完整设备标识</footer>
         </main>
       ) : null}
       {section === "devices" ? (
@@ -250,10 +272,10 @@ export default function App() {
           onStartPairing={() => void handlePairing()}
           onRevoke={() => setConfirmation("revoke")}
           onCalibrate={() => setCalibrationOpen(true)}
-          onThresholdsChange={(unlockRssi, lockRssi, highSensitivityRssi) => void runOperation(
+          onThresholdsChange={(unlockRssi, lockRssi) => void runOperation(
             "thresholds",
-            () => setThresholds(unlockRssi, lockRssi, highSensitivityRssi),
-            `距离阈值已更新：普通解锁 ${unlockRssi}、锁定 ${lockRssi}，高灵敏 ${highSensitivityRssi} dBm`,
+            () => setThresholds(unlockRssi, lockRssi),
+            `普通模式距离阈值已更新：解锁 ${unlockRssi}、锁定 ${lockRssi} dBm`,
           )}
         />
       ) : null}
@@ -261,6 +283,8 @@ export default function App() {
       {section === "settings" ? (
         <SettingsPage
           {...settingsProps}
+          onHighSensitivityParameters={() => setParameterDialog("high-sensitivity")}
+          onDopplerParameters={() => setParameterDialog("doppler")}
           systemIntegration={systemIntegration}
           onPause={(seconds) => void runOperation("pause", () => pauseService(seconds), seconds ? "已暂停 5 分钟" : "蓝牙解锁已恢复")}
           onCredentialProvider={() => void handleCredentialProvider()}
@@ -278,6 +302,21 @@ export default function App() {
         />
       ) : null}
       <CalibrationDialog open={calibrationOpen} onClose={() => setCalibrationOpen(false)} onApplied={() => void refresh()} />
+      <ParameterDialog
+        kind={parameterDialog}
+        value={parameterDialog === "doppler" ? status?.doppler_sensitivity ?? 60 : status?.high_sensitivity_rssi ?? -55}
+        busy={Boolean(busy)}
+        onClose={() => setParameterDialog(null)}
+        onSave={(value) => {
+          const kind = parameterDialog;
+          setParameterDialog(null);
+          if (kind === "doppler") {
+            void runOperation("doppler-parameter", () => setDopplerSensitivity(value), `趋势预测灵敏度已设为 ${value}`);
+          } else if (kind === "high-sensitivity") {
+            void runOperation("high-sensitivity-parameter", () => setHighSensitivityThreshold(value), `高灵敏解锁阈值已设为 ${value} dBm`);
+          }
+        }}
+      />
       {toast ? <div className="toast" role="status">{toast}</div> : null}
     </div>
   );

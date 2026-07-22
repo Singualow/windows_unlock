@@ -1,6 +1,7 @@
 package proximity
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -10,6 +11,8 @@ type Settings struct {
 	UnlockRSSI          int
 	LockRSSI            int
 	HighSensitivity     bool
+	DopplerPrediction   bool
+	DopplerSensitivity  int
 	UnlockWindow        time.Duration
 	LockWindow          time.Duration
 	ProofTimeout        time.Duration
@@ -48,8 +51,9 @@ type sample struct {
 type State struct {
 	mu sync.Mutex
 
-	settings Settings
-	samples  []sample
+	settings      Settings
+	samples       []sample
+	motionSamples []sample
 
 	locked           bool
 	manualHold       bool
@@ -57,6 +61,7 @@ type State struct {
 	lastSeen         time.Time
 	lowSince         time.Time
 	lastProof        time.Time
+	authFailureSince time.Time
 	unlockedAt       time.Time
 	resumeWindowEnds time.Time
 	failures         []time.Time
@@ -76,8 +81,10 @@ func (s *State) UpdateSettings(settings Settings) {
 	// Measurements collected under old thresholds must not immediately drive a
 	// lock or unlock decision after calibration.
 	s.samples = nil
+	s.motionSamples = nil
 	s.awaySince = time.Time{}
 	s.lowSince = time.Time{}
+	s.authFailureSince = time.Time{}
 }
 
 // BeginProofGrace gives a newly selected timing profile one complete proof
@@ -105,11 +112,13 @@ func (s *State) ResetDeviceEvidence() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.samples = nil
+	s.motionSamples = nil
 	s.manualHold = false
 	s.awaySince = time.Time{}
 	s.lastSeen = time.Time{}
 	s.lowSince = time.Time{}
 	s.lastProof = time.Time{}
+	s.authFailureSince = time.Time{}
 	s.resumeWindowEnds = time.Time{}
 	s.failures = nil
 	s.cooldownUntil = time.Time{}
@@ -129,6 +138,10 @@ func (s *State) ObserveRSSI(rssi int, now time.Time) {
 	s.samples = append(s.samples, sample{rssi: rssi, at: now})
 	if len(s.samples) > 5 {
 		s.samples = s.samples[len(s.samples)-5:]
+	}
+	s.motionSamples = append(s.motionSamples, sample{rssi: rssi, at: now})
+	if len(s.motionSamples) > 12 {
+		s.motionSamples = s.motionSamples[len(s.motionSamples)-12:]
 	}
 	if rssi <= s.settings.LockRSSI {
 		if s.lowSince.IsZero() {
@@ -153,8 +166,19 @@ func (s *State) RecordProof(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastProof = now
+	s.authFailureSince = time.Time{}
 	s.failures = nil
 	s.cooldownUntil = time.Time{}
+}
+
+// RecordAttemptFailure starts a continuous authentication-failure window.
+// Repeated failures keep the original start time; a valid proof clears it.
+func (s *State) RecordAttemptFailure(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.authFailureSince.IsZero() {
+		s.authFailureSince = now
+	}
 }
 
 func (s *State) RecordFailure(now time.Time) {
@@ -193,6 +217,7 @@ func (s *State) OnUnlock(now time.Time) {
 	s.locked = false
 	s.manualHold = false
 	s.lowSince = time.Time{}
+	s.authFailureSince = time.Time{}
 	s.unlockedAt = now
 	s.resumeWindowEnds = time.Time{}
 }
@@ -207,10 +232,13 @@ func (s *State) OnResume(now time.Time) {
 func (s *State) ShouldAttemptUnlock(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.locked || s.manualHold || (s.settings.FailureCooldownOn && now.Before(s.cooldownUntil)) || !s.nearLocked(now) {
+	if !s.locked || s.manualHold || (s.settings.FailureCooldownOn && now.Before(s.cooldownUntil)) {
 		return false
 	}
-	return s.hasNearSamplesLocked(now) || now.Before(s.resumeWindowEnds)
+	nearBySignal := s.nearLocked(now)
+	near := nearBySignal && s.hasNearSamplesLocked(now)
+	predicted := s.predictionLocked(now).Ready
+	return near || predicted || (nearBySignal && now.Before(s.resumeWindowEnds))
 }
 
 func (s *State) ShouldAutoLock(now time.Time) bool {
@@ -221,8 +249,74 @@ func (s *State) ShouldAutoLock(now time.Time) bool {
 	}
 	graceElapsed := s.unlockedAt.IsZero() || now.Sub(s.unlockedAt) >= s.settings.ProofTimeout
 	proofMissing := graceElapsed && (s.lastProof.IsZero() || now.Sub(s.lastProof) >= s.settings.ProofTimeout)
+	if (s.settings.HighSensitivity || s.settings.DopplerPrediction) && !s.authFailureSince.IsZero() {
+		// An explicit failure gets a complete continuous failure window of its
+		// own instead of inheriting time already elapsed since the last proof.
+		proofMissing = now.Sub(s.authFailureSince) >= s.settings.ProofTimeout
+	}
 	lowLongEnough := !s.lowSince.IsZero() && now.Sub(s.lowSince) >= s.settings.LockWindow
 	return proofMissing || lowLongEnough
+}
+
+type MotionPrediction struct {
+	ProjectedRSSI int
+	SlopeDBPerSec float64
+	Ready         bool
+}
+
+func (s *State) Prediction(now time.Time) MotionPrediction {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.predictionLocked(now)
+}
+
+func (s *State) predictionLocked(now time.Time) MotionPrediction {
+	if !s.settings.DopplerPrediction {
+		return MotionPrediction{}
+	}
+	cutoff := now.Add(-3500 * time.Millisecond)
+	values := make([]sample, 0, len(s.motionSamples))
+	for _, value := range s.motionSamples {
+		if !value.at.Before(cutoff) && !value.at.After(now) {
+			values = append(values, value)
+		}
+	}
+	if len(values) < 3 {
+		return MotionPrediction{}
+	}
+	span := values[len(values)-1].at.Sub(values[0].at).Seconds()
+	if span < 0.6 {
+		return MotionPrediction{}
+	}
+	origin := values[0].at
+	var sumTime, sumRSSI float64
+	for _, value := range values {
+		sumTime += value.at.Sub(origin).Seconds()
+		sumRSSI += float64(value.rssi)
+	}
+	meanTime := sumTime / float64(len(values))
+	meanRSSI := sumRSSI / float64(len(values))
+	var numerator, denominator float64
+	for _, value := range values {
+		t := value.at.Sub(origin).Seconds() - meanTime
+		numerator += t * (float64(value.rssi) - meanRSSI)
+		denominator += t * t
+	}
+	if denominator == 0 {
+		return MotionPrediction{}
+	}
+	slope := numerator / denominator
+	sensitivity := math.Max(1, math.Min(100, float64(s.settings.DopplerSensitivity)))
+	ratio := (sensitivity - 1) / 99
+	horizon := 0.75 + 2.25*ratio
+	minimumSlope := 3.0 - 2.4*ratio
+	pretriggerMargin := 4.0 + 10.0*ratio
+	latest := values[len(values)-1].rssi
+	projected := int(math.Round(float64(latest) + slope*horizon))
+	ready := latest < s.settings.UnlockRSSI &&
+		float64(latest) >= float64(s.settings.UnlockRSSI)-pretriggerMargin &&
+		slope >= minimumSlope && projected >= s.settings.UnlockRSSI
+	return MotionPrediction{ProjectedRSSI: projected, SlopeDBPerSec: slope, Ready: ready}
 }
 
 func (s *State) CanAuthenticate(now time.Time) bool {

@@ -4,6 +4,9 @@ import { describeError } from "../lib/format";
 import type { ServiceStatus, SignalPoint } from "../types";
 
 const previewValues = [-58, -56, -57, -54, -55, -52, -53, -50, -52, -51, -48, -55, -52, -51, -46, -53, -49, -48];
+const signalHistoryMilliseconds = 10 * 60 * 1_000;
+const signalSampleMilliseconds = 2_000;
+const maximumSignalPoints = signalHistoryMilliseconds / signalSampleMilliseconds;
 
 function previewHistory(): SignalPoint[] {
   if (isDesktopRuntime) return [];
@@ -28,16 +31,21 @@ export function useServiceStatus() {
       if (!alive.current) return;
       setStatus(next);
       setError(null);
-      pollDelay.current = next.high_sensitivity ? 500 : 2_000;
-      if (next.has_rssi && typeof next.median_rssi === "number") {
-        setSignalPoints((current) => {
-          const last = current.at(-1);
-          const point = { at: Date.now(), value: next.median_rssi as number };
-          const minimumGap = next.high_sensitivity ? 450 : 1_500;
-          if (last && point.at - last.at < minimumGap) return current;
-          return [...current, point].slice(-60);
-        });
-      }
+      pollDelay.current = next.high_sensitivity || next.doppler_prediction ? 500 : 2_000;
+      setSignalPoints((current) => {
+        const pointAt = Date.now();
+        const cutoff = pointAt - signalHistoryMilliseconds;
+        const recent = current.filter((sample) => sample.at >= cutoff);
+        const unchanged = recent.length === current.length;
+        if (!next.has_rssi || typeof next.median_rssi !== "number") {
+          return unchanged ? current : recent;
+        }
+        const last = recent.at(-1);
+        if (last && pointAt - last.at < signalSampleMilliseconds) {
+          return unchanged ? current : recent;
+        }
+        return [...recent, { at: pointAt, value: next.median_rssi }].slice(-maximumSignalPoints);
+      });
     } catch (nextError) {
       if (alive.current) setError(describeError(nextError));
     } finally {

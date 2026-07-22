@@ -43,13 +43,6 @@ export function AppHeader({ active, onNavigate }: AppHeaderProps) {
         ))}
       </nav>
       <div className="window-actions">
-        <button className="utility-button" type="button" aria-label="帮助" title="帮助">
-          <Icon name="help" size={21} />
-        </button>
-        <button className="utility-button" type="button" aria-label="托盘提示" title="关闭窗口后仍在托盘运行">
-          <Icon name="inbox" size={21} />
-        </button>
-        <span className="window-divider" />
         <button className="window-button" onClick={() => void windowAction("minimize")} type="button" aria-label="最小化">
           <Icon name="minimize" size={18} />
         </button>

@@ -10,7 +10,7 @@ interface DevicesPageProps {
   onStartPairing: () => void;
   onRevoke: () => void;
   onCalibrate: () => void;
-  onThresholdsChange: (unlockRssi: number, lockRssi: number, highSensitivityRssi: number) => void;
+  onThresholdsChange: (unlockRssi: number, lockRssi: number) => void;
 }
 
 export function DevicesPage({ status, qrCode, pairingExpiresAt, busy, onStartPairing, onRevoke, onCalibrate, onThresholdsChange }: DevicesPageProps) {
@@ -24,13 +24,14 @@ export function DevicesPage({ status, qrCode, pairingExpiresAt, busy, onStartPai
       </div>
       <div className="device-grid">
         <section className="panel paired-device-card">
-          <div className="device-illustration"><Icon name="device" size={38} /><span><Icon name="bluetooth" size={22} /></span></div>
-          <div className="device-main-copy">
-            <h2>{status?.paired ? "Android 手机" : "尚未添加手机"}</h2>
-            <p>{status?.paired ? "已保存两种模式的不可导出公钥" : "使用手机端蓝牙解锁应用扫描配对二维码"}</p>
+          <div className="device-header">
+            <div className="device-illustration"><Icon name="device" size={38} /><span><Icon name="bluetooth" size={22} /></span></div>
+            <div className="device-main-copy">
+              <h2>{status?.paired ? "Android 手机" : "尚未添加手机"}</h2>
+              <p>{status?.paired ? "已保存两种模式的不可导出公钥" : "使用手机端蓝牙解锁应用扫描配对二维码"}</p>
+            </div>
           </div>
           <dl className="device-facts">
-            <div><dt>蓝牙后端</dt><dd>{status?.ble_backend || "等待服务"}</dd></div>
             <div><dt>当前信号</dt><dd>{status?.has_rssi ? `${status.median_rssi} dBm` : "未发现"}</dd></div>
             <div><dt>认证状态</dt><dd>{status?.credential_valid ? "可用" : "需要更新 Windows 密码"}</dd></div>
           </dl>
@@ -59,12 +60,10 @@ export function DevicesPage({ status, qrCode, pairingExpiresAt, busy, onStartPai
         </section>
         <section className="panel calibration-card">
           <div className="section-icon blue"><Icon name="calibrate" size={24} /></div>
-          <div><h2>距离阈值</h2><p>普通模式使用双阈值；高灵敏模式使用独立触发值并自动保留 8 dB 防抖。</p></div>
+          <div><h2>普通模式距离阈值</h2><p>这里只调整默认解锁与锁定阈值；高灵敏和趋势预测参数请在“设置”中单独修改。</p></div>
           <ThresholdEditor
             unlockRssi={status?.unlock_rssi ?? -65}
             lockRssi={status?.lock_rssi ?? -80}
-            highSensitivityRssi={status?.high_sensitivity_rssi ?? -55}
-            highSensitivityEnabled={Boolean(status?.high_sensitivity)}
             busy={Boolean(busy)}
             onApply={onThresholdsChange}
           />
