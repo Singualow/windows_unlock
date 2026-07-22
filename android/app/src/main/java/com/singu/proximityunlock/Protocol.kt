@@ -176,8 +176,8 @@ object Protocol {
     fun rawToDer(raw: ByteArray): ByteArray {
         require(raw.size == 64)
         fun integer(part: ByteArray): ByteArray {
-			val withoutLeadingZeroes = part.dropWhile { it == 0.toByte() }.toByteArray()
-			val stripped = if (withoutLeadingZeroes.isEmpty()) byteArrayOf(0) else withoutLeadingZeroes
+            val withoutLeadingZeroes = part.dropWhile { it == 0.toByte() }.toByteArray()
+            val stripped = if (withoutLeadingZeroes.isEmpty()) byteArrayOf(0) else withoutLeadingZeroes
             return if (stripped[0].toInt() and 0x80 != 0) byteArrayOf(0) + stripped else stripped
         }
         val r = integer(raw.copyOfRange(0, 32))

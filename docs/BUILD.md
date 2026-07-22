@@ -19,11 +19,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 单文件图形安装器 `bin\ProximityUnlockInstaller.exe`。各产物的 SHA-256 会写入
 `bin\SHA256SUMS.txt`。
 
-如需生成可连续升级的个人签名 APK，再执行：
+如需验证 Android 正式构建，再执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-personal-apk.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\build-android-unsigned.ps1
 ```
+
+此脚本只生成未签名的 Release APK，并运行 Release 单元测试和 Lint；未签名产物不能
+分发。正式 Release 必须在受保护的发布环境中签名，并使用 Android SDK `apksigner`
+独立验证证书和签名方案。
 
 ## 普通用户安装
 
@@ -43,12 +47,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-personal-apk.ps1
    （降低安全性）”。此选项只跳过默认十秒离开再返回规则，RSSI 阈值和新鲜签名
    仍然必须通过。
 
-## Android 个人签名
+## Android 正式签名
 
-`scripts\build-personal-apk.ps1` 会在 Git 忽略的 `.local` 目录中创建个人 P-256
-签名证书，并使用当前 Windows 用户的 DPAPI 保护随机密码。需要保持 Android
-应用升级连续性时，请将 `.local` 目录连同 Windows 用户资料一起安全备份。
-调试 APK 仅供开发测试，不适合作为稳定更新渠道。
+签名密钥和密码不存放在仓库、环境变量、构建脚本或日志中。`0.2.1` 及后续正式
+APK 使用固定证书，SHA-256 为
+`E4156161C60F5234821282687EAD2A43616925BBB5AEBA81D35845CA157C7661`。
+发布前必须确认至少启用了 APK Signature Scheme v2，并核对该证书指纹。
+调试 APK 和未签名 APK 仅供开发测试，不适合作为安装或更新渠道。
 
 ## 密码更新与恢复
 

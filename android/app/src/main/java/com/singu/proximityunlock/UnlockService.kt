@@ -1,6 +1,7 @@
 package com.singu.proximityunlock
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.KeyguardManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -103,29 +104,38 @@ class UnlockService : Service() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun createGattServer() {
-		gattReady = false
-        gattServer = bluetoothManager.openGattServer(this, callback).also { server ->
-            val service = BluetoothGattService(Protocol.SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-            val challenge = BluetoothGattCharacteristic(
-                Protocol.CHALLENGE_UUID,
-                BluetoothGattCharacteristic.PROPERTY_WRITE,
-                BluetoothGattCharacteristic.PERMISSION_WRITE,
-            )
-            val response = BluetoothGattCharacteristic(
-                Protocol.RESPONSE_UUID,
-                BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                BluetoothGattCharacteristic.PERMISSION_READ,
-            ).apply { addDescriptor(cccDescriptor()) }
-            val pairing = BluetoothGattCharacteristic(
-                Protocol.PAIRING_UUID,
-                BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                BluetoothGattCharacteristic.PERMISSION_WRITE or BluetoothGattCharacteristic.PERMISSION_READ,
-            ).apply { addDescriptor(cccDescriptor()) }
-            service.addCharacteristic(challenge)
-            service.addCharacteristic(response)
-            service.addCharacteristic(pairing)
-            server.addService(service)
+        if (!hasBluetoothPermission()) {
+            handleMissingBluetoothPermission()
+            return
+        }
+        gattReady = false
+        try {
+            gattServer = bluetoothManager.openGattServer(this, callback).also { server ->
+                val service = BluetoothGattService(Protocol.SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+                val challenge = BluetoothGattCharacteristic(
+                    Protocol.CHALLENGE_UUID,
+                    BluetoothGattCharacteristic.PROPERTY_WRITE,
+                    BluetoothGattCharacteristic.PERMISSION_WRITE,
+                )
+                val response = BluetoothGattCharacteristic(
+                    Protocol.RESPONSE_UUID,
+                    BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                    BluetoothGattCharacteristic.PERMISSION_READ,
+                ).apply { addDescriptor(cccDescriptor()) }
+                val pairing = BluetoothGattCharacteristic(
+                    Protocol.PAIRING_UUID,
+                    BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                    BluetoothGattCharacteristic.PERMISSION_WRITE or BluetoothGattCharacteristic.PERMISSION_READ,
+                ).apply { addDescriptor(cccDescriptor()) }
+                service.addCharacteristic(challenge)
+                service.addCharacteristic(response)
+                service.addCharacteristic(pairing)
+                server.addService(service)
+            }
+        } catch (_: SecurityException) {
+            handleMissingBluetoothPermission()
         }
     }
 
@@ -170,7 +180,7 @@ class UnlockService : Service() {
             if (descriptor.uuid == Protocol.CCC_UUID && value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
                 subscribed += device.address to descriptor.characteristic.uuid
             }
-            if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+            if (responseNeeded) sendGattResponse(device, requestId, offset)
         }
 
         override fun onCharacteristicWriteRequest(
@@ -182,7 +192,7 @@ class UnlockService : Service() {
             offset: Int,
             value: ByteArray,
         ) {
-            if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+            if (responseNeeded) sendGattResponse(device, requestId, offset)
 			val reassemblerKey = device.address to characteristic.uuid
 			val reassembler = reassemblers.getOrPut(reassemblerKey) { Protocol.Reassembler() }
             try {
@@ -257,19 +267,43 @@ class UnlockService : Service() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun notifyFragments(device: BluetoothDevice, uuid: java.util.UUID, type: Byte, payload: ByteArray) {
+        if (!hasBluetoothPermission()) {
+            handleMissingBluetoothPermission()
+            return
+        }
         if (device.address to uuid !in subscribed) return
         val characteristic = gattServer?.getService(Protocol.SERVICE_UUID)?.getCharacteristic(uuid) ?: return
-        for (fragment in Protocol.fragment(type, payload)) {
-            val result = gattServer?.notifyCharacteristicChanged(device, characteristic, false, fragment)
-            if (result != BluetoothStatusCodes.SUCCESS) return
-            Thread.sleep(25)
+        try {
+            for (fragment in Protocol.fragment(type, payload)) {
+                val result = gattServer?.notifyCharacteristicChanged(device, characteristic, false, fragment)
+                if (result != BluetoothStatusCodes.SUCCESS) return
+                Thread.sleep(25)
+            }
+        } catch (_: SecurityException) {
+            handleMissingBluetoothPermission()
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun restartAdvertising() {
-        val advertiser = bluetoothManager.adapter?.bluetoothLeAdvertiser ?: return
-        advertiserCallback?.let { advertiser.stopAdvertising(it) }
+        if (!hasBluetoothPermission()) {
+            handleMissingBluetoothPermission()
+            return
+        }
+        val advertiser = try {
+            bluetoothManager.adapter?.bluetoothLeAdvertiser
+        } catch (_: SecurityException) {
+            handleMissingBluetoothPermission()
+            null
+        } ?: return
+        try {
+            advertiserCallback?.let { advertiser.stopAdvertising(it) }
+        } catch (_: SecurityException) {
+            handleMissingBluetoothPermission()
+            return
+        }
 		advertiserCallback = null
         val pending = store.pendingPairing()
         val data = when {
@@ -310,18 +344,28 @@ class UnlockService : Service() {
 				notifyStatusChanged()
 			}
 		}
-        advertiser.startAdvertising(settings, advertiseData, advertiserCallback)
+        try {
+            advertiser.startAdvertising(settings, advertiseData, advertiserCallback)
+        } catch (_: SecurityException) {
+            handleMissingBluetoothPermission()
+            return
+        }
         handler.removeCallbacks(refreshAdvertisement)
         handler.postDelayed(refreshAdvertisement, 30_000)
     }
 
     private val refreshAdvertisement = Runnable { if (store.enabled()) restartAdvertising() }
 
+    @SuppressLint("MissingPermission")
     private fun stopRuntime() {
         handler.removeCallbacksAndMessages(null)
         if (hasBluetoothPermission()) {
-            advertiserCallback?.let { bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertising(it) }
-            gattServer?.close()
+            try {
+                advertiserCallback?.let { bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertising(it) }
+                gattServer?.close()
+            } catch (_: SecurityException) {
+                Log.w(TAG, "Bluetooth permission was revoked while stopping")
+            }
         }
         advertiserCallback = null
         gattServer = null
@@ -335,6 +379,27 @@ class UnlockService : Service() {
 	private fun notifyStatusChanged() {
 		sendBroadcast(Intent(ACTION_STATUS_CHANGED).setPackage(packageName))
 	}
+
+    @SuppressLint("MissingPermission")
+    private fun sendGattResponse(device: BluetoothDevice, requestId: Int, offset: Int) {
+        if (!hasBluetoothPermission()) {
+            handleMissingBluetoothPermission()
+            return
+        }
+        try {
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+        } catch (_: SecurityException) {
+            handleMissingBluetoothPermission()
+        }
+    }
+
+    private fun handleMissingBluetoothPermission() {
+        store.setRuntimeStatus("缺少附近设备权限")
+        store.addEvent("附近设备权限不可用，蓝牙钥匙已停止", "warning", 60_000)
+        refreshNotification()
+        notifyStatusChanged()
+        stopSelf()
+    }
 
     private fun notification(): android.app.Notification {
         val openIntent = PendingIntent.getActivity(
