@@ -38,6 +38,8 @@ struct RuntimeStatus {
     should_lock: bool,
     #[serde(default)]
     auto_lock: bool,
+    #[serde(default)]
+    high_sensitivity: bool,
     paused_until: Option<String>,
 }
 
@@ -45,6 +47,8 @@ struct RuntimeStatus {
 struct RuntimeDefaults {
     #[serde(default)]
     auto_lock: bool,
+    #[serde(default)]
+    high_sensitivity: bool,
     paused_until: Option<String>,
 }
 
@@ -151,6 +155,13 @@ async fn set_auto_lock(enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn set_high_sensitivity(enabled: bool) -> Result<(), String> {
+    call_control_async("set_high_sensitivity", Some(json!({ "enabled": enabled })))
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
 async fn set_immediate_unlock(enabled: bool) -> Result<(), String> {
     call_control_async("set_immediate_unlock", Some(json!({ "enabled": enabled })))
         .await
@@ -159,29 +170,41 @@ async fn set_immediate_unlock(enabled: bool) -> Result<(), String> {
 
 #[tauri::command]
 async fn set_failure_cooldown(enabled: bool) -> Result<(), String> {
+    call_control_async("set_failure_cooldown", Some(json!({ "enabled": enabled })))
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
+async fn set_thresholds(
+    unlock_rssi: i32,
+    lock_rssi: i32,
+    high_sensitivity_rssi: Option<i32>,
+) -> Result<(), String> {
+    if !thresholds_are_valid(unlock_rssi, lock_rssi, high_sensitivity_rssi) {
+        return Err("距离阈值无效或安全滞回不足".to_owned());
+    }
     call_control_async(
-        "set_failure_cooldown",
-        Some(json!({ "enabled": enabled })),
+        "set_thresholds",
+        Some(json!({
+            "unlock_rssi": unlock_rssi,
+            "lock_rssi": lock_rssi,
+            "high_sensitivity_rssi": high_sensitivity_rssi,
+        })),
     )
     .await
     .map(|_| ())
 }
 
-#[tauri::command]
-async fn set_thresholds(unlock_rssi: i32, lock_rssi: i32) -> Result<(), String> {
-    if unlock_rssi <= lock_rssi
-        || !(-90..=-20).contains(&unlock_rssi)
-        || !(-120..=-28).contains(&lock_rssi)
-        || unlock_rssi - lock_rssi < 8
-    {
-        return Err("距离阈值无效或安全滞回不足".to_owned());
-    }
-    call_control_async(
-        "set_thresholds",
-        Some(json!({ "unlock_rssi": unlock_rssi, "lock_rssi": lock_rssi })),
-    )
-    .await
-    .map(|_| ())
+fn thresholds_are_valid(
+    unlock_rssi: i32,
+    lock_rssi: i32,
+    high_sensitivity_rssi: Option<i32>,
+) -> bool {
+    (-90..=-20).contains(&unlock_rssi)
+        && (-120..=-28).contains(&lock_rssi)
+        && unlock_rssi - lock_rssi >= 8
+        && high_sensitivity_rssi.map_or(true, |value| (-90..=-20).contains(&value))
 }
 
 #[tauri::command]
@@ -365,6 +388,7 @@ fn start_runtime_monitor() {
         .name("proximity-runtime-monitor".to_owned())
         .spawn(move || {
             let mut last_auto_lock = defaults.auto_lock;
+            let mut last_high_sensitivity = defaults.high_sensitivity;
             let mut last_paused = pause_is_active(defaults.paused_until.as_deref());
             let mut unavailable_since: Option<Instant> = None;
             let mut fail_safe_locked = false;
@@ -377,6 +401,7 @@ fn start_runtime_monitor() {
                         fail_safe_locked = false;
                         if let Ok(status) = serde_json::from_value::<RuntimeStatus>(payload) {
                             last_auto_lock = status.auto_lock;
+                            last_high_sensitivity = status.high_sensitivity;
                             last_paused = pause_is_active(status.paused_until.as_deref());
                             if !status.session_active {
                                 let _ = call_control(
@@ -393,16 +418,32 @@ fn start_runtime_monitor() {
                         if !fail_safe_locked
                             && last_auto_lock
                             && !last_paused
-                            && started.elapsed() >= Duration::from_secs(20)
+                            && started.elapsed() >= fail_safe_lock_delay(last_high_sensitivity)
                         {
                             let _ = lock_workstation_impl();
                             fail_safe_locked = true;
                         }
                     }
                 }
-                std::thread::sleep(Duration::from_secs(2));
+                std::thread::sleep(monitor_poll_interval(last_high_sensitivity));
             }
         });
+}
+
+fn monitor_poll_interval(high_sensitivity: bool) -> Duration {
+    if high_sensitivity {
+        Duration::from_millis(300)
+    } else {
+        Duration::from_secs(2)
+    }
+}
+
+fn fail_safe_lock_delay(high_sensitivity: bool) -> Duration {
+    if high_sensitivity {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(20)
+    }
 }
 
 #[cfg(not(windows))]
@@ -484,6 +525,7 @@ pub fn run() {
             get_status,
             set_mode,
             set_auto_lock,
+            set_high_sensitivity,
             set_immediate_unlock,
             set_failure_cooldown,
             set_thresholds,
@@ -496,6 +538,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("蓝牙解锁桌面端启动失败");
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn validates_manual_threshold_hysteresis() {
+        assert!(thresholds_are_valid(-65, -80, Some(-55)));
+        assert!(thresholds_are_valid(-65, -80, None));
+        assert!(!thresholds_are_valid(-65, -70, Some(-55)));
+        assert!(!thresholds_are_valid(-91, -105, Some(-55)));
+        assert!(!thresholds_are_valid(-65, -80, Some(-95)));
+    }
+
+    #[test]
+    fn high_sensitivity_shortens_monitor_timings() {
+        assert!(monitor_poll_interval(true) < monitor_poll_interval(false));
+        assert!(fail_safe_lock_delay(true) < fail_safe_lock_delay(false));
+    }
 }
 
 #[cfg(all(test, windows))]

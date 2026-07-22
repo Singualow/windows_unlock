@@ -17,6 +17,7 @@ export interface ServiceStatus {
   credential_valid: boolean;
   mode: UnlockMode;
   auto_lock: boolean;
+  high_sensitivity: boolean;
   immediate_unlock: boolean;
   failure_cooldown_enabled: boolean;
   paused_until?: string;
@@ -36,6 +37,7 @@ export interface ServiceStatus {
   last_credential_provider_event_at?: string;
   unlock_rssi?: number;
   lock_rssi?: number;
+  high_sensitivity_rssi?: number;
 }
 
 export interface SignalPoint {

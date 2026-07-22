@@ -8,6 +8,7 @@ let previewStatus: ServiceStatus = {
   credential_valid: true,
   mode: "strict",
   auto_lock: true,
+  high_sensitivity: false,
   immediate_unlock: false,
   failure_cooldown_enabled: true,
   session_active: true,
@@ -26,6 +27,7 @@ let previewStatus: ServiceStatus = {
   },
   unlock_rssi: -65,
   lock_rssi: -80,
+  high_sensitivity_rssi: -55,
 };
 
 export const isDesktopRuntime = isTauri();
@@ -56,6 +58,14 @@ export async function setAutoLock(enabled: boolean): Promise<void> {
   await invoke("set_auto_lock", { enabled });
 }
 
+export async function setHighSensitivity(enabled: boolean): Promise<void> {
+  if (!isDesktopRuntime) {
+    previewStatus = { ...previewStatus, high_sensitivity: enabled };
+    return;
+  }
+  await invoke("set_high_sensitivity", { enabled });
+}
+
 export async function setImmediateUnlock(enabled: boolean): Promise<void> {
   if (!isDesktopRuntime) {
     previewStatus = { ...previewStatus, immediate_unlock: enabled };
@@ -72,12 +82,21 @@ export async function setFailureCooldown(enabled: boolean): Promise<void> {
   await invoke("set_failure_cooldown", { enabled });
 }
 
-export async function setThresholds(unlockRssi: number, lockRssi: number): Promise<void> {
+export async function setThresholds(
+  unlockRssi: number,
+  lockRssi: number,
+  highSensitivityRssi?: number,
+): Promise<void> {
   if (!isDesktopRuntime) {
-    previewStatus = { ...previewStatus, unlock_rssi: unlockRssi, lock_rssi: lockRssi };
+    previewStatus = {
+      ...previewStatus,
+      unlock_rssi: unlockRssi,
+      lock_rssi: lockRssi,
+      high_sensitivity_rssi: highSensitivityRssi ?? previewStatus.high_sensitivity_rssi,
+    };
     return;
   }
-  await invoke("set_thresholds", { unlockRssi, lockRssi });
+  await invoke("set_thresholds", { unlockRssi, lockRssi, highSensitivityRssi });
 }
 
 export async function pauseService(seconds: number): Promise<void> {

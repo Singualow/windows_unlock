@@ -43,6 +43,12 @@ export function HeroStatus({ status, error, loading, onLock, onManageDevice }: H
             <Icon name="lock" size={17} />
             {status?.auto_lock ? "自动锁定开启" : "自动锁定关闭"}
           </span>
+          {status?.high_sensitivity ? (
+            <span className="status-chip blue">
+              <Icon name="signal" size={17} />
+              高灵敏响应
+            </span>
+          ) : null}
         </div>
         <div className="hero-actions">
           <button className="primary-button" type="button" onClick={onLock}>

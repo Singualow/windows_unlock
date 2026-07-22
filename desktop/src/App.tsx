@@ -19,14 +19,16 @@ import {
   runSetupAction,
   setAutoLock,
   setFailureCooldown,
+  setHighSensitivity,
   setImmediateUnlock,
   setMode,
+  setThresholds,
   startPairing,
 } from "./lib/backend";
 import { buildSecurityEvents, describeError } from "./lib/format";
 import type { AppSection, SystemIntegration, UnlockMode } from "./types";
 
-type Confirmation = "convenience" | "immediate" | "cooldown" | "revoke" | "uninstall" | null;
+type Confirmation = "convenience" | "immediate" | "cooldown" | "sensitivity" | "revoke" | "uninstall" | null;
 
 const confirmationCopy: Record<Exclude<Confirmation, null>, { title: string; description: string; label: string; tone: "danger" | "warning" }> = {
   convenience: {
@@ -45,6 +47,12 @@ const confirmationCopy: Record<Exclude<Confirmation, null>, { title: string; des
     title: "关闭认证失败冷却？",
     description: "关闭后，签名错误、重放或协议非法也不会触发 5 分钟保护。普通蓝牙超时本来就不会触发此冷却。",
     label: "仍要关闭",
+    tone: "warning",
+  },
+  sensitivity: {
+    title: "开启高灵敏模式？",
+    description: "开启后将使用独立的高灵敏触发阈值。锁屏时首个符合阈值的新鲜广播会在约 0.2 秒内发起认证，失去有效签名约 4 秒便锁定。蓝牙短暂波动可能造成误锁，也会增加手机耗电。",
+    label: "开启高灵敏模式",
     tone: "warning",
   },
   revoke: {
@@ -127,6 +135,14 @@ export default function App() {
     void runOperation("cooldown", () => setFailureCooldown(true), "认证失败冷却已开启");
   }
 
+  function handleHighSensitivity(enabled: boolean) {
+    if (enabled) {
+      setConfirmation("sensitivity");
+      return;
+    }
+    void runOperation("sensitivity", () => setHighSensitivity(false), "高灵敏模式已关闭");
+  }
+
   async function confirmSensitiveAction() {
     const action = confirmation;
     setConfirmation(null);
@@ -138,6 +154,9 @@ export default function App() {
     }
     if (action === "cooldown") {
       await runOperation("cooldown", () => setFailureCooldown(false), "认证失败冷却已关闭");
+    }
+    if (action === "sensitivity") {
+      await runOperation("sensitivity", () => setHighSensitivity(true), "高灵敏模式已开启");
     }
     if (action === "revoke") {
       await runOperation("revoke", revokePairing, "已撤销手机配对");
@@ -189,6 +208,7 @@ export default function App() {
     busy,
     onModeChange: handleModeChange,
     onAutoLockChange: (enabled: boolean) => void runOperation("auto-lock", () => setAutoLock(enabled), enabled ? "自动锁定已开启" : "自动锁定已关闭"),
+    onHighSensitivityChange: handleHighSensitivity,
     onImmediateUnlockChange: handleImmediateUnlock,
     onFailureCooldownChange: handleFailureCooldown,
   };
@@ -209,7 +229,10 @@ export default function App() {
             <SignalChart
               points={signalPoints}
               current={status?.median_rssi}
-              unlockThreshold={status?.unlock_rssi ?? -65}
+              unlockThreshold={status?.high_sensitivity
+                ? status.high_sensitivity_rssi ?? -55
+                : status?.unlock_rssi ?? -65}
+              thresholdLabel={status?.high_sensitivity ? "高灵敏触发" : "解锁阈值"}
               onCalibrate={() => setCalibrationOpen(true)}
             />
             <UnlockSettings {...settingsProps} onMore={() => setSection("settings")} />
@@ -227,6 +250,11 @@ export default function App() {
           onStartPairing={() => void handlePairing()}
           onRevoke={() => setConfirmation("revoke")}
           onCalibrate={() => setCalibrationOpen(true)}
+          onThresholdsChange={(unlockRssi, lockRssi, highSensitivityRssi) => void runOperation(
+            "thresholds",
+            () => setThresholds(unlockRssi, lockRssi, highSensitivityRssi),
+            `距离阈值已更新：普通解锁 ${unlockRssi}、锁定 ${lockRssi}，高灵敏 ${highSensitivityRssi} dBm`,
+          )}
         />
       ) : null}
       {section === "logs" ? <LogsPage events={events} status={status} /> : null}

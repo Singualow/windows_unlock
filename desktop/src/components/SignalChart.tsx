@@ -6,6 +6,7 @@ interface SignalChartProps {
   points: SignalPoint[];
   current?: number;
   unlockThreshold?: number;
+  thresholdLabel?: string;
   onCalibrate: () => void;
 }
 
@@ -46,7 +47,7 @@ function smoothPath(points: ReturnType<typeof chartCoordinates>) {
   return path;
 }
 
-export function SignalChart({ points, current, unlockThreshold = -65, onCalibrate }: SignalChartProps) {
+export function SignalChart({ points, current, unlockThreshold = -65, thresholdLabel = "解锁阈值", onCalibrate }: SignalChartProps) {
   const coordinates = chartCoordinates(points);
   const line = smoothPath(coordinates);
   const area = line ? `${line} L ${bounds.right} ${bounds.bottom} L ${bounds.left} ${bounds.bottom} Z` : "";
@@ -82,7 +83,7 @@ export function SignalChart({ points, current, unlockThreshold = -65, onCalibrat
             );
           })}
           <line x1={bounds.left} y1={yFor(unlockThreshold)} x2={bounds.right} y2={yFor(unlockThreshold)} className="threshold-line" />
-          <text x={bounds.right + 14} y={yFor(unlockThreshold) - 3} className="threshold-label">解锁阈值</text>
+          <text x={bounds.right + 14} y={yFor(unlockThreshold) - 3} className="threshold-label">{thresholdLabel}</text>
           <text x={bounds.right + 14} y={yFor(unlockThreshold) + 15} className="threshold-value">{unlockThreshold} dBm</text>
           {area ? <path d={area} fill="url(#signalArea)" /> : null}
           {line ? <path d={line} className="signal-line" /> : null}

@@ -20,6 +20,7 @@ export function useServiceStatus() {
   const [loading, setLoading] = useState(true);
   const [signalPoints, setSignalPoints] = useState<SignalPoint[]>(previewHistory);
   const alive = useRef(true);
+  const pollDelay = useRef(2_000);
 
   const refresh = useCallback(async () => {
     try {
@@ -27,11 +28,13 @@ export function useServiceStatus() {
       if (!alive.current) return;
       setStatus(next);
       setError(null);
+      pollDelay.current = next.high_sensitivity ? 500 : 2_000;
       if (next.has_rssi && typeof next.median_rssi === "number") {
         setSignalPoints((current) => {
           const last = current.at(-1);
           const point = { at: Date.now(), value: next.median_rssi as number };
-          if (last && point.at - last.at < 1_500) return current;
+          const minimumGap = next.high_sensitivity ? 450 : 1_500;
+          if (last && point.at - last.at < minimumGap) return current;
           return [...current, point].slice(-60);
         });
       }
@@ -47,7 +50,7 @@ export function useServiceStatus() {
     let timer = 0;
     const poll = async () => {
       await refresh();
-      if (alive.current) timer = window.setTimeout(poll, 2_000);
+      if (alive.current) timer = window.setTimeout(poll, pollDelay.current);
     };
     void poll();
     return () => {

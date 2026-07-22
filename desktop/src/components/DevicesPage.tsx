@@ -1,5 +1,6 @@
 import type { ServiceStatus } from "../types";
 import { Icon } from "./Icon";
+import { ThresholdEditor } from "./ThresholdEditor";
 
 interface DevicesPageProps {
   status: ServiceStatus | null;
@@ -9,9 +10,10 @@ interface DevicesPageProps {
   onStartPairing: () => void;
   onRevoke: () => void;
   onCalibrate: () => void;
+  onThresholdsChange: (unlockRssi: number, lockRssi: number, highSensitivityRssi: number) => void;
 }
 
-export function DevicesPage({ status, qrCode, pairingExpiresAt, busy, onStartPairing, onRevoke, onCalibrate }: DevicesPageProps) {
+export function DevicesPage({ status, qrCode, pairingExpiresAt, busy, onStartPairing, onRevoke, onCalibrate, onThresholdsChange }: DevicesPageProps) {
   return (
     <main className="secondary-page">
       <div className="page-title-row">
@@ -57,11 +59,15 @@ export function DevicesPage({ status, qrCode, pairingExpiresAt, busy, onStartPai
         </section>
         <section className="panel calibration-card">
           <div className="section-icon blue"><Icon name="calibrate" size={24} /></div>
-          <div><h2>距离校准</h2><p>按你的房间和设备环境重新计算解锁、锁定阈值。</p></div>
-          <div className="threshold-summary">
-            <span><small>解锁阈值</small><strong>{status?.unlock_rssi ?? -65} dBm</strong></span>
-            <span><small>锁定阈值</small><strong>{status?.lock_rssi ?? -80} dBm</strong></span>
-          </div>
+          <div><h2>距离阈值</h2><p>普通模式使用双阈值；高灵敏模式使用独立触发值并自动保留 8 dB 防抖。</p></div>
+          <ThresholdEditor
+            unlockRssi={status?.unlock_rssi ?? -65}
+            lockRssi={status?.lock_rssi ?? -80}
+            highSensitivityRssi={status?.high_sensitivity_rssi ?? -55}
+            highSensitivityEnabled={Boolean(status?.high_sensitivity)}
+            busy={Boolean(busy)}
+            onApply={onThresholdsChange}
+          />
           <button className="outline-button" type="button" disabled={!status?.has_rssi || Boolean(busy)} onClick={onCalibrate}>
             <Icon name="calibrate" size={18} />开始校准
           </button>

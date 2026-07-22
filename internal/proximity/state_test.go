@@ -173,3 +173,50 @@ func TestManualUnlockHasProofGracePeriod(t *testing.T) {
 		t.Fatal("missing proof did not lock after the grace period")
 	}
 }
+
+func TestHighSensitivityLocksAfterShortProofTimeout(t *testing.T) {
+	settings := DefaultSettings()
+	settings.HighSensitivity = true
+	settings.ProofTimeout = 4 * time.Second
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	s.RecordProof(now)
+	if s.ShouldAutoLock(now.Add(3 * time.Second)) {
+		t.Fatal("high-sensitivity mode locked before its proof timeout")
+	}
+	if !s.ShouldAutoLock(now.Add(4*time.Second + time.Millisecond)) {
+		t.Fatal("high-sensitivity mode did not lock after its proof timeout")
+	}
+}
+
+func TestHighSensitivityUsesLatestNearSample(t *testing.T) {
+	settings := DefaultSettings()
+	settings.HighSensitivity = true
+	settings.UnlockWindow = 1500 * time.Millisecond
+	settings.ProofTimeout = 4 * time.Second
+	settings.RequiredNearSamples = 1
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	for index := 0; index < 4; index++ {
+		s.ObserveRSSI(-90, now.Add(time.Duration(index)*200*time.Millisecond))
+	}
+	s.OnLock(now.Add(time.Second))
+	s.ObserveRSSI(-50, now.Add(1200*time.Millisecond))
+	if !s.ShouldAttemptUnlock(now.Add(1300 * time.Millisecond)) {
+		t.Fatal("fresh near sample did not immediately arm high-sensitivity unlock")
+	}
+}
+
+func TestSensitivityTransitionStartsFreshProofGrace(t *testing.T) {
+	settings := DefaultSettings()
+	s := NewState(settings)
+	now := time.Unix(1_800_000_000, 0)
+	s.OnUnlock(now)
+	settings.HighSensitivity = true
+	settings.ProofTimeout = 4 * time.Second
+	s.UpdateSettings(settings)
+	s.BeginProofGrace(now.Add(time.Minute))
+	if s.ShouldAutoLock(now.Add(time.Minute + 3*time.Second)) {
+		t.Fatal("sensitivity transition ignored its fresh proof grace")
+	}
+}

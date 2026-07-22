@@ -107,6 +107,7 @@ type Status struct {
 	CredentialValid       bool               `json:"credential_valid"`
 	Mode                  string             `json:"mode"`
 	AutoLock              bool               `json:"auto_lock"`
+	HighSensitivity       bool               `json:"high_sensitivity"`
 	ImmediateUnlock       bool               `json:"immediate_unlock"`
 	FailureCooldown       bool               `json:"failure_cooldown_enabled"`
 	PausedUntil           time.Time          `json:"paused_until,omitempty"`
@@ -126,6 +127,7 @@ type Status struct {
 	LastCPEventAt         time.Time          `json:"last_credential_provider_event_at,omitempty"`
 	UnlockRSSI            int                `json:"unlock_rssi"`
 	LockRSSI              int                `json:"lock_rssi"`
+	HighSensitivityRSSI   int                `json:"high_sensitivity_rssi"`
 }
 
 func New(configPath string, cfg config.Config, secrets secret.Store, signer Signer, transport ble.Transport, authorizer *authorize.Manager) *Coordinator {
@@ -152,7 +154,38 @@ func settingsFor(cfg config.Config) proximity.Settings {
 	settings.ManualHoldAway = time.Duration(cfg.Thresholds.ManualHoldAwayMS) * time.Millisecond
 	settings.ImmediateUnlock = cfg.ImmediateUnlock
 	settings.FailureCooldownOn = cfg.FailureCooldown
+	if cfg.HighSensitivity {
+		settings.HighSensitivity = true
+		settings.UnlockRSSI = cfg.Thresholds.HighSensitivityRSSI
+		settings.LockRSSI = cfg.Thresholds.HighSensitivityRSSI - 8
+		settings.UnlockWindow = 1500 * time.Millisecond
+		settings.LockWindow = 2 * time.Second
+		settings.ProofTimeout = 4 * time.Second
+		settings.ManualHoldAway = 2 * time.Second
+		settings.RequiredNearSamples = 1
+	}
 	return settings
+}
+
+func challengeIntervalFor(cfg config.Config, locked bool) time.Duration {
+	if cfg.HighSensitivity {
+		if locked {
+			// The first new near advertisement should start authentication almost
+			// immediately while retaining a small retry limit after failures.
+			return 200 * time.Millisecond
+		}
+		return time.Second
+	}
+	return 3 * time.Second
+}
+
+func authenticationTimeoutFor(cfg config.Config) time.Duration {
+	if cfg.HighSensitivity {
+		// Do not let a stale GATT connection block a newly returned phone for
+		// the normal five-second exchange timeout.
+		return 1500 * time.Millisecond
+	}
+	return 5 * time.Second
 }
 
 func (c *Coordinator) Start(ctx context.Context) error {
@@ -219,6 +252,7 @@ func (c *Coordinator) Status(now time.Time) Status {
 		CredentialValid:       c.config.CredentialValid,
 		Mode:                  c.config.Mode,
 		AutoLock:              c.config.AutoLock,
+		HighSensitivity:       c.config.HighSensitivity,
 		ImmediateUnlock:       c.config.ImmediateUnlock,
 		FailureCooldown:       c.config.FailureCooldown,
 		PausedUntil:           pausedUntil,
@@ -238,6 +272,7 @@ func (c *Coordinator) Status(now time.Time) Status {
 		LastCPEventAt:         c.lastCPEventAt,
 		UnlockRSSI:            c.config.Thresholds.UnlockRSSI,
 		LockRSSI:              c.config.Thresholds.LockRSSI,
+		HighSensitivityRSSI:   c.config.Thresholds.HighSensitivityRSSI,
 	}
 }
 
@@ -286,6 +321,22 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 			return ipc.ControlResponse{Error: err.Error()}
 		}
 		return ipc.ControlResponse{OK: true}
+	case "set_high_sensitivity":
+		var payload struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if json.Unmarshal(request.Payload, &payload) != nil || payload.Enabled == nil {
+			return ipc.ControlResponse{Error: "invalid high-sensitivity request"}
+		}
+		if err := c.updateConfig(func(cfg *config.Config) { cfg.HighSensitivity = *payload.Enabled }); err != nil {
+			return ipc.ControlResponse{Error: err.Error()}
+		}
+		c.mu.Lock()
+		settings := settingsFor(c.config)
+		c.mu.Unlock()
+		c.state.UpdateSettings(settings)
+		c.state.BeginProofGrace(now)
+		return ipc.ControlResponse{OK: true}
 	case "set_immediate_unlock":
 		var payload struct {
 			Enabled *bool `json:"enabled"`
@@ -315,8 +366,9 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		return ipc.ControlResponse{OK: true}
 	case "set_thresholds":
 		var payload struct {
-			UnlockRSSI int `json:"unlock_rssi"`
-			LockRSSI   int `json:"lock_rssi"`
+			UnlockRSSI          int  `json:"unlock_rssi"`
+			LockRSSI            int  `json:"lock_rssi"`
+			HighSensitivityRSSI *int `json:"high_sensitivity_rssi"`
 		}
 		if json.Unmarshal(request.Payload, &payload) != nil {
 			return ipc.ControlResponse{Error: "invalid threshold request"}
@@ -324,13 +376,20 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		if err := c.updateConfig(func(cfg *config.Config) {
 			cfg.Thresholds.UnlockRSSI = payload.UnlockRSSI
 			cfg.Thresholds.LockRSSI = payload.LockRSSI
+			if payload.HighSensitivityRSSI != nil {
+				cfg.Thresholds.HighSensitivityRSSI = *payload.HighSensitivityRSSI
+			}
 		}); err != nil {
 			return ipc.ControlResponse{Error: err.Error()}
 		}
 		c.mu.Lock()
 		settings := settingsFor(c.config)
+		highSensitivity := c.config.HighSensitivity
 		c.mu.Unlock()
 		c.state.UpdateSettings(settings)
+		if highSensitivity {
+			c.state.BeginProofGrace(now)
+		}
 		return ipc.ControlResponse{OK: true}
 	case "pause":
 		var payload struct {
@@ -370,6 +429,7 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 			return ipc.ControlResponse{Error: err.Error()}
 		}
 		c.mu.Lock()
+		previousHighSensitivity := c.config.HighSensitivity
 		if next.TargetSID != c.config.TargetSID || next.PCID != c.config.PCID {
 			c.mu.Unlock()
 			return ipc.ControlResponse{Error: "identity fields cannot be changed while the service is running"}
@@ -377,6 +437,9 @@ func (c *Coordinator) HandleControl(_ context.Context, request ipc.ControlReques
 		c.config = next
 		c.mu.Unlock()
 		c.state.UpdateSettings(settingsFor(next))
+		if previousHighSensitivity != next.HighSensitivity {
+			c.state.BeginProofGrace(now)
+		}
 		if next.CredentialValid {
 			c.authorizer.Enable()
 		} else {
@@ -489,7 +552,8 @@ func (c *Coordinator) handleCandidate(ctx context.Context, candidate ble.Candida
 	c.state.ObserveRSSI(candidate.RSSI, now)
 	c.mu.Lock()
 	paused := cfg.PausedUntil != nil && cfg.PausedUntil.After(now)
-	shouldChallenge := c.sessionActive && !paused && !c.challengeBusy && c.state.CanAuthenticate(now) && now.Sub(c.lastChallenge) >= 3*time.Second && (!c.locked || c.state.ShouldAttemptUnlock(now))
+	locked := c.locked
+	shouldChallenge := c.sessionActive && !paused && !c.challengeBusy && c.state.CanAuthenticate(now) && now.Sub(c.lastChallenge) >= challengeIntervalFor(cfg, locked) && (!locked || c.state.ShouldAttemptUnlock(now))
 	if shouldChallenge {
 		c.challengeBusy = true
 		c.lastChallenge = now
@@ -572,7 +636,7 @@ func (c *Coordinator) authenticate(parent context.Context, candidate ble.Candida
 	if err != nil {
 		return authError("challenge_encode_failed", "无法编码蓝牙挑战", false, err)
 	}
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, authenticationTimeoutFor(cfg))
 	defer cancel()
 	responseWire, err := c.transport.Exchange(ctx, candidate, protocol.MessageChallenge, wire)
 	if err != nil {

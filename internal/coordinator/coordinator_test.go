@@ -139,6 +139,80 @@ func TestFailureCooldownControlIsPersistedAndReported(t *testing.T) {
 	}
 }
 
+func TestHighSensitivityControlIsPersistedAndReported(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cfg := config.Default()
+	path := t.TempDir() + "/config.json"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := New(path, cfg, secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	response := c.HandleControl(context.Background(), mustRequest("set_high_sensitivity", map[string]any{"enabled": true}))
+	if !response.OK || !c.Status(time.Now()).HighSensitivity {
+		t.Fatalf("high-sensitivity control failed: %s", response.Error)
+	}
+	saved, err := config.Load(path)
+	if err != nil || !saved.HighSensitivity {
+		t.Fatal("high-sensitivity preference was not saved")
+	}
+	settings := settingsFor(saved)
+	if settings.ProofTimeout != 4*time.Second || settings.LockWindow != 2*time.Second || settings.RequiredNearSamples != 1 {
+		t.Fatalf("unexpected high-sensitivity profile: %+v", settings)
+	}
+	if settings.UnlockRSSI != saved.Thresholds.HighSensitivityRSSI || settings.LockRSSI != saved.Thresholds.HighSensitivityRSSI-8 {
+		t.Fatalf("dedicated high-sensitivity threshold was not applied: %+v", settings)
+	}
+	if challengeIntervalFor(saved, false) != time.Second || challengeIntervalFor(saved, true) != 200*time.Millisecond {
+		t.Fatal("high-sensitivity challenge intervals were not shortened")
+	}
+	if authenticationTimeoutFor(saved) != 1500*time.Millisecond {
+		t.Fatal("high-sensitivity authentication timeout was not shortened")
+	}
+}
+
+func TestHighSensitivityThresholdControlIsPersistedAndReported(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cfg := config.Default()
+	path := t.TempDir() + "/config.json"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := New(path, cfg, secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	response := c.HandleControl(context.Background(), mustRequest("set_thresholds", map[string]any{
+		"unlock_rssi": -64, "lock_rssi": -80, "high_sensitivity_rssi": -49,
+	}))
+	if !response.OK {
+		t.Fatalf("high-sensitivity threshold control failed: %s", response.Error)
+	}
+	status := c.Status(time.Now())
+	if status.UnlockRSSI != -64 || status.LockRSSI != -80 || status.HighSensitivityRSSI != -49 {
+		t.Fatalf("threshold status was not updated: %+v", status)
+	}
+	saved, err := config.Load(path)
+	if err != nil || saved.Thresholds.HighSensitivityRSSI != -49 {
+		t.Fatal("high-sensitivity threshold was not saved")
+	}
+}
+
+func TestLegacyThresholdControlPreservesHighSensitivityThreshold(t *testing.T) {
+	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cfg := config.Default()
+	path := t.TempDir() + "/config.json"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := New(path, cfg, secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))
+	response := c.HandleControl(context.Background(), mustRequest("set_thresholds", map[string]any{
+		"unlock_rssi": -63, "lock_rssi": -79,
+	}))
+	if !response.OK {
+		t.Fatalf("legacy threshold control failed: %s", response.Error)
+	}
+	if got := c.Status(time.Now()).HighSensitivityRSSI; got != cfg.Thresholds.HighSensitivityRSSI {
+		t.Fatalf("legacy threshold control changed dedicated threshold to %d", got)
+	}
+}
+
 func TestTransientTransportFailuresDoNotTriggerSecurityCooldown(t *testing.T) {
 	pcKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	c := New("unused", config.Default(), secret.NewMemoryStore(), testSigner{pcKey}, testTransport{}, authorize.New(nil))

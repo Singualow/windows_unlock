@@ -7,6 +7,7 @@ interface SettingsPageProps {
   busy: string | null;
   onModeChange: (mode: UnlockMode) => void;
   onAutoLockChange: (enabled: boolean) => void;
+  onHighSensitivityChange: (enabled: boolean) => void;
   onImmediateUnlockChange: (enabled: boolean) => void;
   onFailureCooldownChange: (enabled: boolean) => void;
   onPause: (seconds: number) => void;
@@ -27,6 +28,7 @@ export function SettingsPage(props: SettingsPageProps) {
           busy={props.busy}
           onModeChange={props.onModeChange}
           onAutoLockChange={props.onAutoLockChange}
+          onHighSensitivityChange={props.onHighSensitivityChange}
           onImmediateUnlockChange={props.onImmediateUnlockChange}
           onFailureCooldownChange={props.onFailureCooldownChange}
           onMore={() => undefined}

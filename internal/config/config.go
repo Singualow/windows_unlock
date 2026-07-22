@@ -12,15 +12,16 @@ import (
 	"github.com/singu/proximity-unlock/internal/protocol"
 )
 
-const CurrentVersion = 2
+const CurrentVersion = 3
 
 type Thresholds struct {
-	UnlockRSSI       int `json:"unlock_rssi"`
-	LockRSSI         int `json:"lock_rssi"`
-	UnlockWindowMS   int `json:"unlock_window_ms"`
-	LockWindowMS     int `json:"lock_window_ms"`
-	ProofTimeoutMS   int `json:"proof_timeout_ms"`
-	ManualHoldAwayMS int `json:"manual_hold_away_ms"`
+	UnlockRSSI          int `json:"unlock_rssi"`
+	LockRSSI            int `json:"lock_rssi"`
+	HighSensitivityRSSI int `json:"high_sensitivity_rssi"`
+	UnlockWindowMS      int `json:"unlock_window_ms"`
+	LockWindowMS        int `json:"lock_window_ms"`
+	ProofTimeoutMS      int `json:"proof_timeout_ms"`
+	ManualHoldAwayMS    int `json:"manual_hold_away_ms"`
 }
 
 type Config struct {
@@ -34,6 +35,7 @@ type Config struct {
 	PresenceSecretID string     `json:"presence_secret_id,omitempty"`
 	Mode             string     `json:"mode"`
 	AutoLock         bool       `json:"auto_lock"`
+	HighSensitivity  bool       `json:"high_sensitivity"`
 	ImmediateUnlock  bool       `json:"immediate_unlock"`
 	FailureCooldown  bool       `json:"failure_cooldown_enabled"`
 	PausedUntil      *time.Time `json:"paused_until,omitempty"`
@@ -48,12 +50,13 @@ func Default() Config {
 		AutoLock:        true,
 		FailureCooldown: true,
 		Thresholds: Thresholds{
-			UnlockRSSI:       -65,
-			LockRSSI:         -80,
-			UnlockWindowMS:   3000,
-			LockWindowMS:     20000,
-			ProofTimeoutMS:   20000,
-			ManualHoldAwayMS: 10000,
+			UnlockRSSI:          -65,
+			LockRSSI:            -80,
+			HighSensitivityRSSI: -55,
+			UnlockWindowMS:      3000,
+			LockWindowMS:        20000,
+			ProofTimeoutMS:      20000,
+			ManualHoldAwayMS:    10000,
 		},
 	}
 }
@@ -65,8 +68,13 @@ func (c Config) Validate() error {
 	if _, err := protocol.ParseMode(c.Mode); err != nil {
 		return err
 	}
-	if c.Thresholds.UnlockRSSI <= c.Thresholds.LockRSSI || c.Thresholds.UnlockRSSI > -20 || c.Thresholds.LockRSSI < -120 {
+	if c.Thresholds.UnlockRSSI < -90 || c.Thresholds.UnlockRSSI > -20 ||
+		c.Thresholds.LockRSSI < -120 || c.Thresholds.LockRSSI > -28 ||
+		c.Thresholds.UnlockRSSI-c.Thresholds.LockRSSI < 8 {
 		return errors.New("invalid RSSI thresholds or hysteresis")
+	}
+	if c.Thresholds.HighSensitivityRSSI < -90 || c.Thresholds.HighSensitivityRSSI > -20 {
+		return errors.New("invalid high-sensitivity RSSI threshold")
 	}
 	if c.Thresholds.UnlockWindowMS < 1000 || c.Thresholds.LockWindowMS < 5000 || c.Thresholds.ProofTimeoutMS < 5000 || c.Thresholds.ManualHoldAwayMS < 5000 {
 		return errors.New("unsafe timing threshold")
@@ -120,6 +128,8 @@ func Load(path string) (Config, error) {
 		result = migrateV0(result, raw)
 	} else if result.Version == 1 {
 		result = migrateV1(result, raw)
+	} else if result.Version == 2 {
+		result = migrateV2(result)
 	}
 	if err := result.Validate(); err != nil {
 		return Config{}, err
@@ -145,6 +155,7 @@ func migrateV0(value Config, raw map[string]json.RawMessage) Config {
 	if value.Thresholds.LockRSSI == 0 {
 		value.Thresholds.LockRSSI = defaults.Thresholds.LockRSSI
 	}
+	defaultHighSensitivityRSSI(&value)
 	if value.Thresholds.UnlockWindowMS == 0 {
 		value.Thresholds.UnlockWindowMS = defaults.Thresholds.UnlockWindowMS
 	}
@@ -165,7 +176,38 @@ func migrateV1(value Config, raw map[string]json.RawMessage) Config {
 	if _, present := raw["failure_cooldown_enabled"]; !present {
 		value.FailureCooldown = Default().FailureCooldown
 	}
+	defaultHighSensitivityRSSI(&value)
 	return value
+}
+
+func migrateV2(value Config) Config {
+	value.Version = CurrentVersion
+	if value.Thresholds.HighSensitivityRSSI == 0 {
+		// Preserve the previous lock boundary while making the dedicated high-
+		// sensitivity trigger as permissive as the required 8 dB hysteresis
+		// allows. This improves return-to-unlock latency without causing an
+		// upgrade to lock sooner than the user's old configuration.
+		candidate := value.Thresholds.LockRSSI + 8
+		if value.Thresholds.LockRSSI != 0 && candidate >= -90 && candidate <= -20 {
+			value.Thresholds.HighSensitivityRSSI = candidate
+		} else {
+			defaultHighSensitivityRSSI(&value)
+		}
+	}
+	return value
+}
+
+func defaultHighSensitivityRSSI(value *Config) {
+	if value.Thresholds.HighSensitivityRSSI != 0 {
+		return
+	}
+	// Very old configurations had no separate high-sensitivity profile, so use
+	// their existing unlock distance. New installations use a dedicated default.
+	if value.Thresholds.UnlockRSSI != 0 {
+		value.Thresholds.HighSensitivityRSSI = value.Thresholds.UnlockRSSI
+	} else {
+		value.Thresholds.HighSensitivityRSSI = Default().Thresholds.HighSensitivityRSSI
+	}
 }
 
 func Save(path string, value Config) error {

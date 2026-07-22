@@ -6,6 +6,7 @@ interface UnlockSettingsProps {
   busy: string | null;
   onModeChange: (mode: UnlockMode) => void;
   onAutoLockChange: (enabled: boolean) => void;
+  onHighSensitivityChange: (enabled: boolean) => void;
   onImmediateUnlockChange: (enabled: boolean) => void;
   onFailureCooldownChange: (enabled: boolean) => void;
   onMore: () => void;
@@ -58,6 +59,7 @@ export function UnlockSettings({
   busy,
   onModeChange,
   onAutoLockChange,
+  onHighSensitivityChange,
   onImmediateUnlockChange,
   onFailureCooldownChange,
   onMore,
@@ -105,6 +107,20 @@ export function UnlockSettings({
           kind="switch"
           disabled={disabled}
           onClick={() => onAutoLockChange(!status?.auto_lock)}
+        />
+        <SettingRow
+          id="high-sensitivity"
+          icon="signal"
+          tone="blue"
+          title="高灵敏模式"
+          description={status?.high_sensitivity
+            ? "快速检测离开和返回，短暂波动可能误锁"
+            : "缩短检测周期，提升锁定与解锁响应"}
+          selected={Boolean(status?.high_sensitivity)}
+          kind="switch"
+          warning={Boolean(status?.high_sensitivity)}
+          disabled={disabled}
+          onClick={() => onHighSensitivityChange(!status?.high_sensitivity)}
         />
         <SettingRow
           id="immediate-unlock"

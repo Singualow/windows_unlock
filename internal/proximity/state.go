@@ -9,6 +9,7 @@ import (
 type Settings struct {
 	UnlockRSSI          int
 	LockRSSI            int
+	HighSensitivity     bool
 	UnlockWindow        time.Duration
 	LockWindow          time.Duration
 	ProofTimeout        time.Duration
@@ -77,6 +78,16 @@ func (s *State) UpdateSettings(settings Settings) {
 	s.samples = nil
 	s.awaySince = time.Time{}
 	s.lowSince = time.Time{}
+}
+
+// BeginProofGrace gives a newly selected timing profile one complete proof
+// window before it can lock an already-unlocked session.
+func (s *State) BeginProofGrace(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.locked {
+		s.unlockedAt = now
+	}
 }
 
 func (s *State) SetImmediateUnlock(enabled bool) {
@@ -239,6 +250,17 @@ func (s *State) LastProof() time.Time {
 }
 
 func (s *State) nearLocked(now time.Time) bool {
+	if s.settings.HighSensitivity {
+		cutoff := now.Add(-s.settings.UnlockWindow)
+		for index := len(s.samples) - 1; index >= 0; index-- {
+			sample := s.samples[index]
+			if sample.at.Before(cutoff) {
+				break
+			}
+			return sample.rssi >= s.settings.UnlockRSSI
+		}
+		return false
+	}
 	median, ok := s.medianLocked(now)
 	return ok && median >= s.settings.UnlockRSSI
 }
