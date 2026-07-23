@@ -177,9 +177,20 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .time-end { transform: translateX(-100%); }
 .threshold-overlay { display: flex; flex-direction: column; gap: 5px; transform: translateY(-50%); color: #13966a; }
 .threshold-overlay strong, .threshold-overlay span { font-size: 12px; font-weight: 650; white-space: nowrap; }
-.signal-line { fill: none; stroke: var(--blue); stroke-width: 2.7; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.signal-dot-halo { fill: rgba(36, 118, 246, .17); }
-.signal-dot { fill: var(--blue); stroke: #fff; stroke-width: 2; }
+.signal-line { fill: none; stroke: var(--blue); stroke-width: 2.7; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; shape-rendering: geometricPrecision; }
+.signal-current-marker {
+  position: absolute;
+  z-index: 2;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: var(--blue);
+  box-shadow: 0 0 0 5px rgba(36, 118, 246, .17);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
 .chart-empty { position: absolute; inset: 50% 0 auto; color: #8b94a4; text-align: center; font-size: 14px; }
 .distance-controls { display: flex; align-items: center; gap: 30px; padding: 1px 8px 0; }
 .distance-scale { flex: 1; min-width: 0; }

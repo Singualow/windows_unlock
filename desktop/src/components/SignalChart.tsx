@@ -30,22 +30,80 @@ function chartCoordinates(points: SignalPoint[], now: number) {
   }));
 }
 
+function smoothCoordinates(points: ReturnType<typeof chartCoordinates>) {
+  if (points.length < 3) return points;
+
+  const kernel = [1, 4, 6, 4, 1];
+  const radius = Math.floor(kernel.length / 2);
+  const smoothed = points.map((point, index) => {
+    let weightedY = 0;
+    let totalWeight = 0;
+    for (let offset = -radius; offset <= radius; offset += 1) {
+      const neighbor = points[index + offset];
+      if (!neighbor) continue;
+      const weight = kernel[offset + radius];
+      weightedY += neighbor.y * weight;
+      totalWeight += weight;
+    }
+    return { ...point, y: weightedY / totalWeight };
+  });
+
+  const anchorEndpoint = (atStart: boolean) => {
+    const anchorIndex = atStart ? 0 : smoothed.length - 1;
+    const correction = points[anchorIndex].y - smoothed[anchorIndex].y;
+    const anchorCount = Math.min(6, smoothed.length);
+    for (let step = 0; step < anchorCount; step += 1) {
+      const progress = anchorCount === 1 ? 1 : step / (anchorCount - 1);
+      const eased = progress * progress * (3 - 2 * progress);
+      const index = atStart ? step : smoothed.length - anchorCount + step;
+      const influence = atStart ? 1 - eased : eased;
+      smoothed[index] = {
+        ...smoothed[index],
+        y: smoothed[index].y + correction * influence,
+      };
+    }
+  };
+
+  anchorEndpoint(true);
+  anchorEndpoint(false);
+  return smoothed;
+}
+
 function smoothPath(points: ReturnType<typeof chartCoordinates>) {
   if (!points.length) return "";
   if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+
   let path = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
-  for (let index = 1; index < points.length; index += 1) {
-    const previous = points[index - 1];
-    const current = points[index];
-    const middle = (previous.x + current.x) / 2;
-    path += ` C ${middle.toFixed(1)} ${previous.y.toFixed(1)}, ${middle.toFixed(1)} ${current.y.toFixed(1)}, ${current.x.toFixed(1)} ${current.y.toFixed(1)}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const before = points[index - 1] ?? points[index];
+    const start = points[index];
+    const end = points[index + 1];
+    const after = points[index + 2] ?? end;
+    const width = end.x - start.x;
+    if (width <= 0) {
+      path += ` L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+      continue;
+    }
+
+    const controlOffset = width / 3;
+    const startSpan = end.x - before.x;
+    const endSpan = after.x - start.x;
+    const startSlope = startSpan > 0 ? (end.y - before.y) / startSpan : 0;
+    const endSlope = endSpan > 0 ? (after.y - start.y) / endSpan : 0;
+    const localMinimum = Math.min(before.y, start.y, end.y, after.y);
+    const localMaximum = Math.max(before.y, start.y, end.y, after.y);
+    const control1X = start.x + controlOffset;
+    const control1Y = Math.max(localMinimum, Math.min(localMaximum, start.y + startSlope * controlOffset));
+    const control2X = end.x - controlOffset;
+    const control2Y = Math.max(localMinimum, Math.min(localMaximum, end.y - endSlope * controlOffset));
+    path += ` C ${control1X.toFixed(1)} ${control1Y.toFixed(1)}, ${control2X.toFixed(1)} ${control2Y.toFixed(1)}, ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
   }
   return path;
 }
 
 export function SignalChart({ points, current, unlockThreshold = -65, thresholdLabel = "解锁阈值", onCalibrate }: SignalChartProps) {
   const now = Date.now();
-  const coordinates = chartCoordinates(points, now);
+  const coordinates = smoothCoordinates(chartCoordinates(points, now));
   const line = smoothPath(coordinates);
   const area = line ? `${line} L ${bounds.right} ${bounds.bottom} L ${bounds.left} ${bounds.bottom} Z` : "";
   const last = coordinates.at(-1);
@@ -83,13 +141,14 @@ export function SignalChart({ points, current, unlockThreshold = -65, thresholdL
           <line x1={bounds.left} y1={yFor(unlockThreshold)} x2={bounds.right} y2={yFor(unlockThreshold)} className="threshold-line" />
           {area ? <path d={area} fill="url(#signalArea)" /> : null}
           {line ? <path d={line} className="signal-line" /> : null}
-          {last ? (
-            <>
-              <circle cx={last.x} cy={last.y} r="8" className="signal-dot-halo" />
-              <circle cx={last.x} cy={last.y} r="4.5" className="signal-dot" />
-            </>
-          ) : null}
         </svg>
+        {last ? (
+          <span
+            className="signal-current-marker"
+            style={{ left: leftPercent(last.x), top: topPercent(last.y) }}
+            aria-hidden="true"
+          />
+        ) : null}
         <div className="chart-label-layer" aria-hidden="true">
           {[-40, -50, -60, -70, -80].map((value) => (
             <span className="chart-label axis-overlay" key={value} style={{ top: topPercent(yFor(value)) }}>{value} dBm</span>

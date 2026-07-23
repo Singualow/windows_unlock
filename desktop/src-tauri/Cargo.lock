@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "proximity-unlock-desktop"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "serde",
  "serde_json",
